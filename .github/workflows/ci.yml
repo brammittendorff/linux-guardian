@@ -25,6 +25,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -65,7 +66,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: stable
 
       - name: Build debug
         run: cargo build --verbose
@@ -95,6 +96,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Check formatting
@@ -112,6 +114,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
+        with:
+          toolchain: stable
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.20.1 --locked
@@ -128,6 +132,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
+        with:
+          toolchain: stable
 
       - name: Install tarpaulin
         run: cargo install cargo-tarpaulin --version 0.31.2 --locked
@@ -149,6 +155,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
+        with:
+          toolchain: stable
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.16.5 --locked
