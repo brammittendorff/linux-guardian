@@ -25,7 +25,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: stable
+          toolchain: "1.82"
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -66,7 +66,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: stable
+          toolchain: "1.82"
 
       - name: Build debug
         run: cargo build --verbose
@@ -96,7 +96,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: stable
+          toolchain: "1.82"
           components: rustfmt, clippy
 
       - name: Check formatting
@@ -115,10 +115,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: stable
+          toolchain: "1.82"
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.20.1 --locked
+        run: cargo install cargo-audit --version 0.21.2 --locked
 
       - name: Run security audit
         run: cargo audit
@@ -133,10 +133,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: stable
+          toolchain: "1.82"
 
       - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin --version 0.31.2 --locked
+        run: cargo install cargo-tarpaulin --version 0.34.1 --locked
 
       - name: Generate coverage
         run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
@@ -156,10 +156,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
-          toolchain: stable
+          toolchain: "1.82"
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --version 0.16.5 --locked
+        run: cargo install cargo-deny --version 0.18.5 --locked
 
       - name: Run cargo-deny (advisories)
         run: cargo deny check advisories

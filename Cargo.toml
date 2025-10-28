@@ -2,6 +2,7 @@
 name = "linux-guardian"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 authors = ["Linux Guardian Contributors"]
 description = "Comprehensive Linux security scanner for detecting rootkits, malware, privilege escalation, and active attacks"
 license = "MIT OR Apache-2.0"
