@@ -15,17 +15,31 @@ use tracing::info;
 fn get_db_path() -> PathBuf {
     let system_path = PathBuf::from("/var/cache/linux-guardian/cve.db");
 
-    // Try system path if we have permissions
-    if let Some(parent) = system_path.parent() {
-        if std::fs::create_dir_all(parent).is_ok()
-            && std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&system_path)
-                .is_ok()
+    // Check if system path exists and is accessible
+    if system_path.exists() {
+        // If database exists, check if we can read and write to it
+        if std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&system_path)
+            .is_ok()
         {
             return system_path;
+        }
+        // Database exists but we don't have permissions - use user home
+    } else {
+        // Try to create system path if we have permissions
+        if let Some(parent) = system_path.parent() {
+            if std::fs::create_dir_all(parent).is_ok()
+                && std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&system_path)
+                    .is_ok()
+            {
+                return system_path;
+            }
         }
     }
 

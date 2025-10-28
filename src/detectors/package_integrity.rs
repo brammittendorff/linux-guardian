@@ -1,6 +1,9 @@
 use crate::models::Finding;
 use anyhow::Result;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 use tracing::{debug, info};
 
 /// Verify package integrity to detect supply chain attacks and tampering
@@ -30,6 +33,26 @@ pub async fn verify_package_integrity() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// Get cache path for package integrity results
+fn get_integrity_cache_path() -> PathBuf {
+    let mut path = if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".cache/linux-guardian")
+    } else {
+        PathBuf::from("/tmp/linux-guardian")
+    };
+    let _ = fs::create_dir_all(&path);
+    path.push("package_integrity.cache");
+    path
+}
+
+/// Check if package database has changed (indicates new installs/updates)
+fn package_db_modified() -> Option<SystemTime> {
+    // Check dpkg status file modification time
+    fs::metadata("/var/lib/dpkg/status")
+        .ok()
+        .and_then(|m| m.modified().ok())
+}
+
 /// Check dpkg package integrity (Debian/Ubuntu)
 async fn check_dpkg_integrity() -> Option<Vec<Finding>> {
     let mut findings = Vec::new();
@@ -37,6 +60,56 @@ async fn check_dpkg_integrity() -> Option<Vec<Finding>> {
     let check = Command::new("dpkg").arg("--version").output().ok()?;
     if !check.status.success() {
         return None;
+    }
+
+    let cache_path = get_integrity_cache_path();
+    let current_db_time = package_db_modified()?;
+
+    // Check if we have a recent cache
+    if let Ok(cache_metadata) = fs::metadata(&cache_path) {
+        if let Ok(cache_time) = cache_metadata.modified() {
+            let cache_age = SystemTime::now().duration_since(cache_time).ok()?;
+
+            // Use cache if:
+            // 1. Cache is less than 24 hours old AND
+            // 2. Package database hasn't been modified since cache was created
+            if cache_age < Duration::from_secs(24 * 3600) {
+                if let Ok(cache_db_time) = fs::read_to_string(&cache_path) {
+                    if let Some(line) = cache_db_time.lines().next() {
+                        // First line contains the package DB timestamp
+                        if line.starts_with("DB_TIME:") {
+                            let cached_db_timestamp = line.strip_prefix("DB_TIME:")?.trim();
+                            let current_db_timestamp = format!("{:?}", current_db_time);
+
+                            if cached_db_timestamp == current_db_timestamp {
+                                info!(
+                                    "  Using cached integrity check (no package changes detected)"
+                                );
+                                debug!(
+                                    "Cache age: {:.1}h, package DB unchanged",
+                                    cache_age.as_secs_f32() / 3600.0
+                                );
+
+                                // Parse cached findings
+                                for line in cache_db_time.lines().skip(1) {
+                                    if !line.is_empty() {
+                                        findings.push(
+                                            Finding::high(
+                                                "package_integrity",
+                                                "Modified Package File Detected",
+                                                &format!("Package file has been modified: {}", line),
+                                            )
+                                            .with_remediation("Investigate: This could indicate tampering or corruption. Reinstall affected package or run debsums for details."),
+                                        );
+                                    }
+                                }
+                                return Some(findings);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     info!(
@@ -114,6 +187,15 @@ async fn check_dpkg_integrity() -> Option<Vec<Finding>> {
             modified_files.len()
         );
     }
+
+    // Write cache with package DB timestamp and modified files
+    let cache_content = format!(
+        "DB_TIME: {:?}\n{}",
+        current_db_time,
+        modified_files.join("\n")
+    );
+    let _ = fs::write(&cache_path, cache_content);
+    debug!("Cached integrity results to {:?}", cache_path);
 
     Some(findings)
 }

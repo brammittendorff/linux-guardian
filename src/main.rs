@@ -281,6 +281,20 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
                 tokio::spawn(binary_validation::validate_critical_binaries()), // Binary verification
                 tokio::spawn(malware_hashes::scan_malware_hashes()), // Hash-based malware detection
                 tokio::spawn(malware_hashes::scan_elf_anomalies()),  // ELF binary analysis
+                // NEW: Advanced rootkit & exploit detection
+                tokio::spawn(detectors::ebpf::detect_ebpf_programs()), // eBPF rootkits
+                tokio::spawn(detectors::ebpf::detect_ebpf_maps()),     // eBPF data exfiltration
+                tokio::spawn(detectors::kernel_modules::detect_kernel_modules()), // Kernel rootkits
+                tokio::spawn(detectors::kernel_modules::check_module_parameters()), // Module tampering
+                tokio::spawn(detectors::systemd_security::detect_systemd_tampering()), // Systemd backdoors
+                tokio::spawn(detectors::systemd_security::check_systemd_timers()), // Persistence
+                tokio::spawn(detectors::systemd_security::check_init_scripts()),   // Legacy init
+                tokio::spawn(detectors::cron_backdoor::detect_cron_backdoors()), // Cron persistence
+                tokio::spawn(detectors::cron_backdoor::check_at_jobs()),         // At jobs
+                tokio::spawn(detectors::process_capabilities::detect_dangerous_capabilities()), // CAP_SYS_ADMIN
+                tokio::spawn(detectors::process_capabilities::check_file_capabilities()), // SUID alternatives
+                tokio::spawn(detectors::memory_security::detect_memory_injection()), // Code injection
+                tokio::spawn(detectors::memory_security::check_core_dumps()), // Exploitation evidence
             ];
 
             for handle in comp_handles {
