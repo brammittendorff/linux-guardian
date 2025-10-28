@@ -12,22 +12,6 @@ pub enum ScanMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
-pub enum UserProfile {
-    /// Auto-detect best profile based on system
-    Auto,
-    /// Desktop/home user (simple, focused on malware/threats)
-    Desktop,
-    /// Gamer (performance-aware, cryptominer focus)
-    Gaming,
-    /// Software developer (dev tools, containers, supply chain)
-    Developer,
-    /// Server administrator (all security checks, compliance)
-    Server,
-    /// Maximum security (all checks, paranoid mode)
-    Paranoid,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum ScanCategory {
     /// All categories
     All,
@@ -55,19 +39,6 @@ pub enum OutputStyle {
     Simple,
     /// Only summary (no detailed findings)
     Summary,
-}
-
-impl std::fmt::Display for UserProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UserProfile::Auto => write!(f, "Auto"),
-            UserProfile::Desktop => write!(f, "Desktop"),
-            UserProfile::Gaming => write!(f, "Gaming"),
-            UserProfile::Developer => write!(f, "Developer"),
-            UserProfile::Server => write!(f, "Server"),
-            UserProfile::Paranoid => write!(f, "Paranoid"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

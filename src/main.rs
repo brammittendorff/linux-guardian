@@ -5,9 +5,11 @@ use std::time::Instant;
 use tracing::{info, Level};
 
 use linux_guardian::detectors;
-use linux_guardian::models::{OutputStyle, ScanCategory, ScanMode, UserProfile};
+use linux_guardian::models::{OutputStyle, ScanCategory, ScanMode};
 use linux_guardian::output;
-use linux_guardian::utils::privilege::check_privileges;
+use linux_guardian::utils::privilege::{
+    check_privileges, get_detector_privilege_info, group_detectors_by_privilege,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "linux-guardian")]
@@ -18,10 +20,6 @@ struct Args {
     /// Scan mode: fast (10-30s), comprehensive (1-3min), deep (5-15min)
     #[arg(short, long, value_enum, default_value = "fast")]
     mode: ScanMode,
-
-    /// User profile: auto, desktop, gaming, developer, server, paranoid
-    #[arg(short, long, value_enum)]
-    profile: Option<UserProfile>,
 
     /// Category filter: all, malware, hardening, privacy, compliance, development, network
     #[arg(short, long, value_enum)]
@@ -66,6 +64,10 @@ struct Args {
     /// Hide CVE database findings (show only system issues and verified CVEs)
     #[arg(long)]
     no_cve_db: bool,
+
+    /// Show detailed privilege requirements for all detectors
+    #[arg(long)]
+    show_privilege_info: bool,
 }
 
 #[tokio::main]
@@ -85,6 +87,12 @@ async fn main() -> Result<()> {
         .with_max_level(log_level)
         .with_target(false)
         .init();
+
+    // Handle privilege info display
+    if args.show_privilege_info {
+        print_privilege_info_table();
+        return Ok(());
+    }
 
     // Handle CVE database operations
     if args.update_cve_db {
@@ -123,23 +131,10 @@ async fn main() -> Result<()> {
         print_banner();
     }
 
-    // Detect profile if auto or show suggestion
-    let profile = args.profile.unwrap_or(UserProfile::Auto);
-    if profile == UserProfile::Auto && !args.quiet {
-        println!("{}", detect_profile_message());
-    }
-
-    // Check privileges
+    // Check privileges and show detailed information
     let is_root = check_privileges();
-    if !is_root && !args.skip_privilege_check {
-        eprintln!(
-            "{}",
-            "⚠️  WARNING: Not running as root. Some security checks will be limited.".yellow()
-        );
-        eprintln!(
-            "{}",
-            "   Run with sudo for complete system analysis.\n".yellow()
-        );
+    if !is_root && !args.skip_privilege_check && !args.quiet {
+        print_privilege_warning(&args.mode);
     }
 
     info!("Starting security scan in {:?} mode", args.mode);
@@ -344,13 +339,146 @@ fn print_banner() {
 
 // Helper functions
 
-fn detect_profile_message() -> String {
-    // Simple auto-detection logic
-    let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+fn print_privilege_warning(mode: &ScanMode) {
+    let (no_root, partial_root, requires_root) = group_detectors_by_privilege();
 
-    if has_display {
-        "Tip: Detected desktop environment. Try --profile desktop for tailored results".to_string()
-    } else {
-        "Tip: Detected server environment. Try --profile server for full checks".to_string()
+    println!("{}", "⚠️  Running without root privileges".yellow().bold());
+    println!();
+
+    println!("{}", "✅ FULL FUNCTIONALITY (no root needed):".green());
+    println!(
+        "   {} detectors will run with complete features",
+        no_root.len()
+    );
+    println!("   • CVE database checks");
+    println!("   • Network connection analysis");
+    println!("   • Kernel hardening checks");
+    println!("   • Disk encryption detection");
+    println!();
+
+    println!(
+        "{}",
+        "⚠️  PARTIAL FUNCTIONALITY (limited without root):".yellow()
+    );
+    println!(
+        "   {} detectors will run with reduced features",
+        partial_root.len()
+    );
+    println!("   • SSH: config analysis only (no auth log analysis)");
+    println!("   • Firewall: basic status (no full ruleset)");
+    println!("   • Process: own processes only (not all users)");
+    println!("   • Container: basic checks (limited Docker access)");
+    println!();
+
+    println!("{}", "❌ DISABLED (requires root):".red());
+    println!(
+        "   {} detector(s) will be completely skipped",
+        requires_root.len()
+    );
+    println!("   • Privilege Escalation: SUID/capability scanning");
+    println!();
+
+    match mode {
+        ScanMode::Fast => {
+            println!(
+                "{}",
+                "📝 Note: Fast mode uses mostly non-privileged checks".cyan()
+            );
+        }
+        ScanMode::Comprehensive | ScanMode::Deep => {
+            println!(
+                "{}",
+                "📝 Note: Run with sudo for complete system analysis in this mode".cyan()
+            );
+        }
     }
+
+    println!(
+        "   Run {} for detailed breakdown",
+        "--show-privilege-info".bright_cyan()
+    );
+    println!();
+}
+
+fn print_privilege_info_table() {
+    println!(
+        "{}",
+        "🔐 Detector Privilege Requirements".bold().bright_cyan()
+    );
+    println!();
+
+    let (no_root, partial_root, requires_root) = group_detectors_by_privilege();
+
+    // NO ROOT REQUIRED
+    println!("{}", "✅ NO ROOT REQUIRED".green().bold());
+    println!(
+        "{}",
+        "   These detectors work fully without root privileges:".green()
+    );
+    println!();
+    for detector in &no_root {
+        let info = get_detector_privilege_info(detector);
+        println!("   • {}", format!("{:30}", detector).bright_white());
+        if !info.works_without_root.is_empty() {
+            for feature in info.works_without_root {
+                println!("     {}", format!("✓ {}", feature).dimmed());
+            }
+        }
+    }
+    println!();
+
+    // PARTIAL ROOT
+    println!("{}", "⚠️  PARTIAL ROOT ACCESS".yellow().bold());
+    println!(
+        "{}",
+        "   These detectors work partially without root:".yellow()
+    );
+    println!();
+    for detector in &partial_root {
+        let info = get_detector_privilege_info(detector);
+        println!("   • {}", format!("{:30}", detector).bright_white().bold());
+
+        if !info.works_without_root.is_empty() {
+            println!("     {} (without root):", "Available".green());
+            for feature in info.works_without_root {
+                println!("       {}", format!("✓ {}", feature).green());
+            }
+        }
+
+        if !info.requires_root_for.is_empty() {
+            println!("     {} (requires root):", "Limited".yellow());
+            for feature in info.requires_root_for {
+                println!("       {}", format!("⚠ {}", feature).yellow());
+            }
+        }
+        println!();
+    }
+
+    // REQUIRES ROOT
+    println!("{}", "❌ ROOT REQUIRED".red().bold());
+    println!("{}", "   These detectors require root privileges:".red());
+    println!();
+    for detector in &requires_root {
+        let info = get_detector_privilege_info(detector);
+        println!("   • {}", format!("{:30}", detector).bright_white().bold());
+        for reason in info.requires_root_for {
+            println!("     {}", format!("✗ {}", reason).red());
+        }
+    }
+    println!();
+
+    println!("{}", "💡 RECOMMENDATIONS:".cyan().bold());
+    println!("   • For desktop users: Most checks work without root");
+    println!("   • For servers: Run with sudo for complete coverage");
+    println!("   • For security audits: Root access is recommended");
+    println!();
+    println!(
+        "   Run: {} for non-root scan",
+        "linux-guardian --mode fast".bright_cyan()
+    );
+    println!(
+        "   Run: {} for complete scan",
+        "sudo linux-guardian --mode comprehensive".bright_cyan()
+    );
+    println!();
 }

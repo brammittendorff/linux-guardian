@@ -1,484 +1,292 @@
-# 🛡️ Linux Guardian - Comprehensive Security Scanner
+# 🛡️ Linux Guardian - Security Scanner
 
-**Fast, comprehensive Linux security scanner for detecting rootkits, malware, privilege escalation, cryptominers, and active attacks in 2025.**
+**Fast Linux security scanner that detects real threats: rootkits, malware, cryptominers, and known vulnerabilities.**
 
-Built in Rust for maximum performance and safety.
+Built in Rust. Scans your system in 10-30 seconds.
 
-## 🎯 Features
-
-### Critical Threat Detection (2025)
-
-- **Privilege Escalation**
-  - CVE-2025-32462 & CVE-2025-32463 (sudo vulnerabilities)
-  - CVE-2023-0386 (OverlayFS exploit)
-  - CVE-2021-22555 (Netfilter)
-  - SUID/SGID binary scanning with suspicious location detection
-  - Dangerous file capabilities detection
-
-- **Cryptominer & Backdoor Detection**
-  - Known miners (xmrig, kinsing, perfctl, etc.)
-  - CPU anomaly detection
-  - Mining pool connection detection
-  - Hidden processes with deleted binaries
-  - Cron job analysis for persistence
-
-- **SSH Security**
-  - Brute force attack detection
-  - Unauthorized SSH key detection
-  - Recent key modifications
-  - Dangerous SSH configurations
-  - Successful login after failed attempts
-
-- **Rootkit Detection**
-  - Hidden process detection
-  - Hidden network connections
-  - Deleted binary execution
-  - Process/proc filesystem mismatches
-
-- **Network Analysis**
-  - Suspicious port monitoring
-  - Malicious connection detection
-  - High-numbered port services
-  - Connection count anomalies
-
-- **Process Analysis**
-  - Known malware detection
-  - Suspicious process locations (/tmp, /dev/shm)
-  - Orphaned processes
-  - Hidden process names
-
-- **🆕 CVE Database Integration**
-  - **CISA KEV Catalog**: 1,400+ actively exploited CVEs
-  - **NVD Database**: 314,000+ total CVEs (optional)
-  - Automatic package version detection
-  - Daily database updates
-  - Offline mode with caching
-  - See [CVE Database Documentation](docs/CVE_DATABASE.md) for details
-
----
-
-## 🔍 Verification & Accuracy
-
-**How to verify findings are real:** See **[Verification Guide](docs/VERIFICATION_GUIDE.md)**
-
-**Current Accuracy:**
-- **True Positives**: 100% (Detects real vulnerabilities)
-- **False Positives**: ~0% (Smart filtering with verbose mode)
-- **Race Condition Handling**: Automatic (filters short-lived processes)
-- **Whitelist**: 40+ legitimate processes (browsers, daemons, shells)
-
-**Use `--verbose` to see filtering in action:**
-```bash
-./target/release/linux-guardian --verbose
-# Shows: "DEBUG PID X is short-lived process (race condition), skipping"
-```
-
-## 📦 Installation
-
-### Prerequisites
-
-Install Rust if you haven't already:
+## 🚀 Quick Start
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-```
-
-### Build from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/brammittendorff/linux-guardian.git
-cd linux-guardian
-
-# Build in release mode (optimized)
+# Build it
 cargo build --release
 
-# The binary will be at target/release/linux-guardian
-sudo cp target/release/linux-guardian /usr/local/bin/
+# Run without root (safe checks only)
+./target/release/linux-guardian
+
+# Run with root (complete scan)
+sudo ./target/release/linux-guardian
 ```
 
-## 🚀 Usage
+That's it. It tells you if something's wrong.
 
-### Quick Start - Simple Security Check
+## 📖 Basic Usage
 
-For home users who just want to know "am I safe?":
+### Just check if I'm hacked
 
 ```bash
-sudo linux-guardian --output simple --score
+sudo linux-guardian
 ```
 
-Shows plain English results + security score (0-100).
+Shows findings in ~15 seconds. Red = bad, yellow = check it, white = info.
 
-### User Profiles (New!)
-
-Choose a profile for tailored scanning:
+### Without root privileges
 
 ```bash
-sudo linux-guardian --profile desktop      # Home/desktop user
-sudo linux-guardian --profile gaming       # Gamer (cryptominer-focused)
-sudo linux-guardian --profile developer    # Developer (containers, dev tools)
-sudo linux-guardian --profile server       # Server admin (comprehensive)
-sudo linux-guardian --profile paranoid     # Maximum security
+./target/release/linux-guardian
 ```
 
-### Scan Modes
+Many checks work without root. It shows you exactly what's limited and what's not.
+
+**See what requires root:**
+```bash
+./target/release/linux-guardian --show-privilege-info
+```
+
+### Quiet mode (only show problems)
 
 ```bash
-sudo linux-guardian                        # Fast (10-30s) - recommended
-sudo linux-guardian --mode comprehensive   # Full scan (1-3min)
-sudo linux-guardian --mode deep            # Deep scan (5-15min)
+sudo linux-guardian --quiet
 ```
 
-### Category Filtering (New!)
-
-Focus on specific security areas:
+### Show only active threats
 
 ```bash
-sudo linux-guardian --category malware       # Only check for threats
-sudo linux-guardian --category hardening     # System hardening tips
-sudo linux-guardian --category network       # Network security
-sudo linux-guardian --category development   # Dev environment
+sudo linux-guardian --threats-only
 ```
 
-### Security Score (New!)
-
-Get a 0-100 security rating:
+### Check specific things
 
 ```bash
-sudo linux-guardian --score                  # Show score + findings
-sudo linux-guardian --output summary         # Score + summary only
+sudo linux-guardian --category malware      # Only malware/cryptominers
+sudo linux-guardian --category hardening    # System security config
+sudo linux-guardian --category network      # Network security
 ```
 
-### Smart Filtering (New!)
+### Different scan depths
 
 ```bash
-sudo linux-guardian --threats-only           # Only active threats
-sudo linux-guardian --min-severity critical  # Only critical issues
-sudo linux-guardian --min-severity high      # High + critical
+sudo linux-guardian                        # Fast (10-30s) - default
+sudo linux-guardian --mode comprehensive   # Thorough (1-3min)
+sudo linux-guardian --mode deep            # Complete (5-15min)
 ```
 
-### Output Formats
+## 🎯 What It Detects
 
-```bash
-sudo linux-guardian --output terminal        # Standard (default)
-sudo linux-guardian --output simple          # Plain English
-sudo linux-guardian --output summary         # Score + summary only
-sudo linux-guardian --output json            # JSON for automation
-```
+### Active Threats
+- **Cryptominers**: xmrig, kinsing, perfctl, and CPU-intensive malware
+- **Rootkits**: Hidden processes, deleted binaries, process hiding
+- **SSH Attacks**: Brute force attempts, unauthorized keys
+- **Backdoors**: Suspicious network connections, unusual processes
 
-### Advanced Options
+### Known Vulnerabilities (CVE Database)
+- **1,400+ actively exploited CVEs** from CISA's catalog
+- Checks: sudo, kernel, openssh, systemd, polkit, dbus, and more
+- Example: Detects vulnerable sudo versions (CVE-2025-32462/32463)
 
-```bash
-sudo linux-guardian --quiet                  # Only show findings
-sudo linux-guardian --verbose                # Debug information
-sudo linux-guardian --skip-privilege-check   # Run without sudo
-sudo linux-guardian --no-cve-db              # Hide CVE database results
-```
+### Privilege Escalation
+- Suspicious SUID binaries (setuid root files)
+- Unusual file capabilities
+- Binaries in dangerous locations (/tmp, /dev/shm)
 
-### Example Workflows
-
-**Home User - "Am I hacked?"**
-```bash
-sudo linux-guardian --output simple --threats-only
-```
-
-**Gamer - Quick malware check**
-```bash
-sudo linux-guardian --category malware --score
-```
-
-**Developer - Check my dev environment**
-```bash
-sudo linux-guardian --profile developer
-```
-
-**Sysadmin - Critical issues only (JSON)**
-```bash
-sudo linux-guardian --min-severity critical --output json
-```
-
-**Security Health Check**
-```bash
-sudo linux-guardian --output summary
-```
+### System Weaknesses
+- Firewall disabled or misconfigured
+- Unencrypted disks
+- Weak SSH configuration
+- Missing security updates
+- Insecure kernel parameters
 
 ## 📊 Understanding Results
 
-### Severity Levels
+**🔴 CRITICAL** = Immediate threat. Fix now.
+- Example: "Known cryptominer detected", "Actively exploited CVE found"
 
-- **🔴 CRITICAL**: Immediate action required - active compromise likely
-  - Vulnerable sudo version (CVE-2025-32462/32463)
-  - Known malware/cryptominer detected
-  - Active brute force with successful login
-  - Rootkit indicators
+**🟠 HIGH** = Serious issue. Investigate today.
+- Example: "Suspicious SUID binary", "Unauthorized SSH key"
 
-- **🟠 HIGH**: Serious security issue requiring prompt attention
-  - Suspicious SUID binaries
-  - Recent unauthorized SSH keys
-  - Processes from /tmp or /dev/shm
-  - Unusual network connections
+**🟡 MEDIUM** = Potential problem. Check when you can.
+- Example: "Unknown SUID binary", "High CPU usage"
 
-- **🟡 MEDIUM**: Potential security concern to investigate
-  - Unknown SUID binaries
-  - High CPU usage
-  - Orphaned processes
-  - High-numbered listening ports
+**⚪ LOW** = Recommendation. Nice to fix.
+- Example: "Firewall not enabled", "Disk not encrypted"
 
-- **⚪ LOW**: Best practice violations or informational
-  - Configuration improvements
-  - Hardening recommendations
+## 🔧 Advanced Options
 
-### Example Output
+### Output formats
 
+```bash
+sudo linux-guardian --output json     # For scripts/automation
+sudo linux-guardian --output summary  # Just the score
 ```
-╔═══════════════════════════════════════════════════════════╗
-║         🛡️  LINUX GUARDIAN - Security Scanner 🛡️          ║
-║              Real-time Threat Detection 2025              ║
-╚═══════════════════════════════════════════════════════════╝
 
-Security Findings:
-════════════════════════════════════════════════════════════
+### Filter by severity
 
+```bash
+sudo linux-guardian --min-severity high      # Only high + critical
+sudo linux-guardian --min-severity critical  # Only critical
+```
+
+### CVE database
+
+```bash
+# Update CVE database (do this weekly)
+sudo linux-guardian --update-cve-db
+
+# See database stats
+sudo linux-guardian --cve-db-stats
+
+# Skip CVE checks (faster)
+sudo linux-guardian --no-cve-db
+```
+
+### Automation
+
+```bash
+# CI/CD pipeline
+sudo linux-guardian --output json --quiet > scan.json
+
+# Daily cron job
+0 2 * * * /usr/local/bin/linux-guardian --quiet >> /var/log/security.log 2>&1
+```
+
+## 💡 Privilege Separation
+
+**10 detectors work fully without root:**
+- CVE database checks
+- Network connection analysis
+- Kernel hardening checks
+- Disk encryption detection
+- System update checks
+
+**11 detectors work partially without root:**
+- SSH: Config analysis works, log analysis needs root
+- Firewall: Basic status works, full rules need root
+- Processes: Your processes work, all users need root
+- Containers: Basic checks work, Docker socket needs root
+
+**1 detector requires root:**
+- SUID binary scanning (needs filesystem access)
+
+Run `--show-privilege-info` to see exactly what needs root and why.
+
+## 📦 Installation
+
+### From source (recommended)
+
+```bash
+# Install Rust if needed
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Build
+git clone https://github.com/brammittendorff/linux-guardian.git
+cd linux-guardian
+cargo build --release
+
+# Install (optional)
+sudo cp target/release/linux-guardian /usr/local/bin/
+```
+
+### Requirements
+
+- Rust 1.75+
+- Linux (tested on Ubuntu, Debian, Fedora, Arch)
+- Root access for complete scans (optional for basic checks)
+
+## 🔍 Real-World Examples
+
+**Finding 1: Cryptominer**
+```
+🔴 CRITICAL Known Cryptominer Process Detected
+  Process "xmrig" (PID 12345) is a known cryptominer
+  💡 Remediation: kill -9 12345 && investigate how it got there
+```
+
+**Finding 2: Vulnerable sudo**
+```
 🔴 CRITICAL Vulnerable Sudo Version Detected
-  Category: privilege_escalation
-  Sudo version 1.9.15 is vulnerable to CVE-2025-32462, CVE-2025-32463
-  💡 Remediation: Update sudo to version 1.9.17p1 or later
-  🔗 CVE: CVE-2025-32462, CVE-2025-32463
-
-🟠 HIGH Recent Root SSH Key Modification
-  Category: ssh_backdoor
-  Root authorized_keys file was modified 2 days ago. 3 keys present.
-  💡 Remediation: Review /root/.ssh/authorized_keys
-
-════════════════════════════════════════════════════════════
-Summary:
-  🔴 Critical: 1
-  🟠 High:     1
-  🟡 Medium:   0
-  ⚪ Low:      0
-
-  ⏱️  Scan completed in 12.34s (Fast mode)
+  Sudo version 1.9.15 vulnerable to CVE-2025-32462
+  💡 Remediation: apt update && apt upgrade sudo
 ```
 
-## 🔍 What Gets Checked
-
-### Fast Mode (Default - ~10-30 seconds)
-
-1. **🆕 CVE Database Check** - CISA KEV: 1,400+ actively exploited vulnerabilities
-2. **Sudo Version Check** - CVE-2025-32462/32463 detection
-3. **SUID Binary Scan** - Suspicious privileged executables
-4. **CPU Anomalies** - Cryptominer detection
-5. **SSH Keys** - Unauthorized access detection
-6. **Brute Force** - SSH attack detection
-7. **Process Analysis** - Malware and suspicious processes
-8. **Network Connections** - Malicious connections
-
-### Comprehensive Mode (~1-3 minutes)
-
-All fast mode checks plus:
-- Kernel vulnerability checks
-- File capability analysis
-- Cron job inspection
-- Extended network analysis
-- DNS configuration review
-
-### Deep Mode (~5-15 minutes)
-
-All comprehensive checks plus:
-- Full filesystem scanning
-- Inline hook detection (future)
-- Temporal anomaly analysis (future)
-- Memory pattern scanning (future)
-
-## 🔧 Advanced Usage
-
-### Automation / CI/CD
-
-```bash
-# Run in CI pipeline
-sudo linux-guardian --output json --quiet > results.json
-if [ $? -ne 0 ]; then
-    echo "Security issues detected!"
-    exit 1
-fi
+**Finding 3: SSH attack**
+```
+🟠 HIGH SSH Brute Force Attack Detected
+  248 failed login attempts in last 24h
+  💡 Remediation: Check /var/log/auth.log, consider fail2ban
 ```
 
-### Scheduled Scanning
-
-Add to crontab for daily scans:
-
-```bash
-# Run daily at 2 AM
-0 2 * * * /usr/local/bin/linux-guardian --mode fast --output json >> /var/log/security-scan.log 2>&1
+**Finding 4: Suspicious SUID**
+```
+🟠 HIGH Unpackaged SUID Binary Detected
+  /tmp/exploit has SUID bit set, not managed by package manager
+  💡 Remediation: Remove: sudo rm /tmp/exploit
 ```
 
-### SIEM Integration
+## 🛡️ What Makes This Different
 
-```bash
-# Send results to logging system
-sudo linux-guardian --output json | logger -t linux-guardian -p security.info
-```
-
-## 🎯 Detection Coverage
-
-Based on 2025 threat research:
-
-| Threat Category | Detection Rate | Speed | Coverage |
-|----------------|----------------|-------|----------|
-| **🆕 CVE Detection** | ⭐⭐⭐⭐⭐ **98%** | **Fast** | **1,400+ Actively Exploited** |
-| Privilege Escalation | ⭐⭐⭐⭐⭐ 95% | Fast | Critical CVEs |
-| Cryptominers | ⭐⭐⭐⭐⭐ 90% | Fast | All Major Miners |
-| SSH Attacks | ⭐⭐⭐⭐⭐ 95% | Fast | Brute Force + Keys |
-| Rootkits (userspace) | ⭐⭐⭐⭐ 80% | Fast | Process/File Hiding |
-| Rootkits (kernel) | ⭐⭐⭐ 60% | Medium | Syscall Hooks |
-| Network Backdoors | ⭐⭐⭐⭐ 85% | Fast | C2 + Mining Pools |
-| Container Escapes | ⭐⭐⭐ 70% | Medium | Capability Abuse |
-| Ransomware | ⭐⭐⭐ 65% | Fast | File Encryption |
-
-## 🛠️ Development
-
-### Build for Development
-
-```bash
-cargo build
-./target/debug/linux-guardian --help
-```
-
-### Run Tests
-
-```bash
-cargo test
-```
-
-### Enable All Features
-
-```bash
-cargo build --release --features full
-```
-
-## 📚 Detection Methods Explained
-
-### 🆕 CVE Database Detection
-
-Linux Guardian integrates with two comprehensive vulnerability databases:
-
-#### **CISA KEV (Primary - Fast)**
-- **Source**: US Government CISA Known Exploited Vulnerabilities Catalog
-- **Coverage**: 1,400+ CVEs **actively exploited in the wild**
-- **Speed**: ~2-3 seconds (first run), ~1s cached
-- **Update**: Daily automatic refresh
-- **Priority**: All findings are CRITICAL/HIGH (active threats)
-
-**How it works**:
-1. Downloads CISA KEV catalog (or uses 24-hour cache)
-2. Detects installed packages via dpkg/rpm/direct binary checks
-3. Matches package versions against known exploited CVEs
-4. Flags any matches as CRITICAL (actively exploited)
-
-#### **NVD Database (Optional - Comprehensive)**
-- **Source**: NIST National Vulnerability Database
-- **Coverage**: 314,000+ total CVEs
-- **Speed**: ~10-30 seconds per product
-- **Update**: Weekly cache refresh
-- **Priority**: CVSS-based (7.0+ = HIGH, 9.0+ = CRITICAL)
-
-**Package Detection Methods**:
-- `dpkg` queries (Debian/Ubuntu)
-- `rpm` queries (RHEL/CentOS/Fedora)
-- Direct binary version checks (sudo, openssh, kernel)
-- Fuzzy product name matching
-
-📖 **Full Documentation**: See [docs/CVE_DATABASE.md](docs/CVE_DATABASE.md)
-
-### Privilege Escalation Detection
-
-- **Version Checking**: Compares installed versions against CVE database
-- **SUID Scanning**: Walks filesystem checking for suspicious setuid binaries
-- **Location Analysis**: Flags binaries in /tmp, /dev/shm, /var/tmp
-- **Whitelist Comparison**: Known-good SUID binaries are excluded
-
-### Cryptominer Detection
-
-- **Process Name Matching**: Detects known miner names (xmrig, kinsing, etc.)
-- **CPU Profiling**: Identifies high CPU usage patterns
-- **Network Analysis**: Detects connections to mining pools
-- **Binary Deletion**: Finds processes with deleted executables
-- **Cron Analysis**: Scans for persistence mechanisms
-
-### SSH Attack Detection
-
-- **Log Parsing**: Analyzes /var/log/auth.log for failed attempts
-- **Pattern Recognition**: Identifies brute force patterns
-- **Key Monitoring**: Detects unauthorized SSH key additions
-- **Config Auditing**: Checks for insecure SSH settings
-
-### Rootkit Detection
-
-- **Process Enumeration**: Compares /proc with syscalls
-- **Network Comparison**: Validates connection counts
-- **Binary Integrity**: Checks for deleted/modified files
-- **Hidden Detection**: Multiple enumeration methods
+**Fast**: 10-30 seconds for most scans
+**Accurate**: Smart filtering, minimal false positives
+**Practical**: Clear remediation steps
+**Private**: All scanning is local, no data sent anywhere
+**Open**: Full source code, no mystery boxes
 
 ## ⚡ Performance
 
-- **Fast Mode**: 10-30 seconds (typical: 12s)
-- **CPU Usage**: < 5% during scan
-- **Memory**: < 100MB RAM
-- **Disk I/O**: Minimal (reads only, no writes except logs)
+- **Scan time**: 10-30 seconds (fast mode)
+- **CPU usage**: <5% during scan
+- **Memory**: <100MB
+- **Disk**: Read-only, no modifications
 
-Optimizations:
-- Parallel execution using Tokio async runtime
-- Efficient /proc parsing with procfs crate
-- Early termination on critical findings
-- Smart caching of system information
+## 🔒 Security & Privacy
 
-## 🔐 Security & Privacy
+- ✅ All scanning is local
+- ✅ No data sent to external servers
+- ✅ Read-only operations
+- ✅ Open source (audit the code)
+- ✅ No telemetry or tracking
 
-- **No Data Collection**: All scanning is local, no data sent externally
-- **No Modifications**: Read-only operations (except when you act on findings)
-- **Privilege Separation**: Many checks work without root
-- **Open Source**: Full code transparency
+## 🐛 Known Limitations
+
+- **Kernel rootkits**: Limited detection (needs eBPF/kernel modules)
+- **Encrypted malware**: Can't scan encrypted files
+- **Memory-only threats**: Doesn't scan RAM (yet)
+- **Zero-days**: Only detects known threats + suspicious behavior
+
+Use as **part** of your security, not the only tool.
 
 ## 🤝 Contributing
 
-Contributions are welcome! Areas for improvement:
-
-1. **Additional CVE Detection**: Add more vulnerability checks
-2. **Machine Learning**: Anomaly detection improvements
-3. **Container Support**: Enhanced Docker/K8s scanning
-4. **eBPF Integration**: Real-time kernel monitoring
-5. **Performance**: Further optimization opportunities
+PRs welcome! Especially for:
+- New CVE checks
+- Better cryptominer detection
+- Container security improvements
+- Performance optimizations
 
 ## 📜 License
 
 MIT OR Apache-2.0
 
-## ⚠️ Disclaimer
+## ⚠️ Legal
 
-This tool is for defensive security purposes only. It helps system administrators detect compromises and vulnerabilities on systems they own or have authorization to scan.
+**Defensive use only.** For systems you own or have permission to scan.
 
-- Do not use on systems you don't own or have permission to scan
-- Detection is not 100% - use as part of defense-in-depth strategy
-- Always investigate findings before taking action
-- Keep the tool updated for latest threat detection
+Do not:
+- Scan systems you don't own
+- Use for offensive security without authorization
+- Rely on this as your only security tool
 
-## 🔗 References
+Always investigate findings before taking action.
 
-This tool was developed based on 2025 security research including:
+## 📚 References
 
-- **CISA KEV Catalog**: https://www.cisa.gov/known-exploited-vulnerabilities-catalog
-- **NIST NVD**: https://nvd.nist.gov/
-- **Trend Micro Linux Threat Landscape Report**
-- **Thalium rkchk Rootkit Detection Research**
-- **Linux Kernel CVE Database**
-- **MITRE ATT&CK Framework**
-- **OpenCVE**: https://www.opencve.io/
+- [CISA KEV Catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
+- [NIST NVD](https://nvd.nist.gov/)
+- [CVE Database Documentation](docs/CVE_DATABASE.md)
+- [Verification Guide](docs/VERIFICATION_GUIDE.md)
 
-## 📞 Support
+## 💬 Support
 
-For issues and feature requests, please use the GitHub issue tracker.
+Issues and questions: [GitHub Issues](https://github.com/brammittendorff/linux-guardian/issues)
 
 ---
 
-**Stay secure! 🛡️**
+**Keep your system secure. 🛡️**
