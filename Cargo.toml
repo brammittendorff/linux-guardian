@@ -1,0 +1,71 @@
+[package]
+name = "linux-guardian"
+version = "0.1.0"
+edition = "2021"
+authors = ["Linux Guardian Contributors"]
+description = "Comprehensive Linux security scanner for detecting rootkits, malware, privilege escalation, and active attacks"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "linux_guardian"
+path = "src/lib.rs"
+
+[[bin]]
+name = "linux-guardian"
+path = "src/main.rs"
+
+[dependencies]
+# CLI and configuration
+clap = { version = "4.5", features = ["derive", "cargo"] }
+colored = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# System interfaces
+libc = "0.2"
+nix = { version = "0.29", features = ["user", "process", "fs"] }
+procfs = { version = "0.16", default-features = false }
+
+# Async runtime for parallel execution
+tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
+
+# HTTP client for CVE database downloads
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# SQLite database for CVE caching
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Logging and error handling
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Performance
+rayon = "1.10"
+parking_lot = "0.12"
+
+# Utilities
+chrono = "0.4"
+regex = "1.11"
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2.5"
+
+# Network analysis (optional, can be enabled for advanced features)
+pnet = { version = "0.35", optional = true }
+
+[dev-dependencies]
+tempfile = "3.13"
+
+[features]
+default = []
+network = ["pnet"]
+full = ["network"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
