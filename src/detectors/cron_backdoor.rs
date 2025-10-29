@@ -95,7 +95,45 @@ fn check_cron_file(path: &std::path::Path, findings: &mut Vec<Finding>) -> Resul
     Ok(())
 }
 
+/// Check if a file is managed by a package manager (dpkg, rpm)
+/// Package-managed files are legitimate and installed by trusted packages
+fn is_package_managed_file(file_path: &str) -> bool {
+    // Try dpkg first (Debian/Ubuntu)
+    if let Ok(output) = std::process::Command::new("dpkg")
+        .args(["-S", file_path])
+        .output()
+    {
+        if output.status.success() {
+            // dpkg found a package owning this file
+            return true;
+        }
+    }
+
+    // Try rpm (RHEL/Fedora/openSUSE)
+    if let Ok(output) = std::process::Command::new("rpm")
+        .args(["-qf", file_path])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // rpm returns "file ... is not owned by any package" on failure
+            if !stdout.contains("is not owned by any package") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn check_cron_content(content: &str, source: &str, findings: &mut Vec<Finding>) {
+    // Generic verification: Check if cron file is owned by a package
+    // Files in /etc/cron.* that are managed by dpkg are legitimate
+    if is_package_managed_file(source) {
+        debug!("Skipping package-managed cron file: {}", source);
+        return;
+    }
+
     // Suspicious command patterns in cron jobs
     let backdoor_patterns = [
         ("curl", "Downloading external content"),

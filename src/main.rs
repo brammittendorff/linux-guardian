@@ -65,6 +65,22 @@ struct Args {
     #[arg(long)]
     no_cve_db: bool,
 
+    /// Update malware hash database (downloads MalwareBazaar hashes)
+    #[arg(long)]
+    update_malware_db: bool,
+
+    /// Show malware hash database statistics
+    #[arg(long)]
+    malware_db_stats: bool,
+
+    /// Skip malware hash database checks
+    #[arg(long)]
+    no_malware_db: bool,
+
+    /// Deep malware scan: scan ALL files (disables filtering, much slower)
+    #[arg(long)]
+    deep_malware_scan: bool,
+
     /// Show detailed privilege requirements for all detectors
     #[arg(long)]
     show_privilege_info: bool,
@@ -91,6 +107,23 @@ async fn main() -> Result<()> {
     // Handle privilege info display
     if args.show_privilege_info {
         print_privilege_info_table();
+        return Ok(());
+    }
+
+    // Handle malware hash database operations
+    if args.update_malware_db {
+        if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
+            eprintln!("❌ Malware hash database update failed: {}", e);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if args.malware_db_stats {
+        if let Err(e) = detectors::malware_hash_db::show_malware_db_stats().await {
+            eprintln!("❌ Failed to show malware database stats: {}", e);
+            std::process::exit(1);
+        }
         return Ok(());
     }
 
@@ -154,6 +187,11 @@ async fn main() -> Result<()> {
             .retain(|f| f.category != "cve_database" && f.category != "cve_knowledge_base");
     }
 
+    // Filter by malware hash database option
+    if args.no_malware_db {
+        filtered_findings.retain(|f| f.category != "malware_hash_match");
+    }
+
     // Filter by category
     if let Some(category) = args.category {
         filtered_findings.retain(|f| f.matches_category(category));
@@ -209,10 +247,10 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
 
     match args.mode {
         ScanMode::Fast => {
-            info!("Running fast scan (9 critical checks + CVE databases)...\n");
+            info!("Running fast scan (9 critical checks + malware hash check in high-risk locations)...\n");
 
             // Run all fast checks in parallel
-            let handles = vec![
+            let mut handles = vec![
                 tokio::spawn(cve_knowledge_base::check_cve_knowledge_base()),
                 tokio::spawn(cve_database::check_known_exploited_vulnerabilities()),
                 tokio::spawn(privilege_escalation::scan_suid_binaries(is_root)),
@@ -223,6 +261,14 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
                 tokio::spawn(network::analyze_connections()),
             ];
 
+            // Add fast malware hash check (only /tmp, /var/tmp, /dev/shm)
+            if !args.no_malware_db {
+                let deep_scan = args.deep_malware_scan;
+                handles.push(tokio::spawn(async move {
+                    detectors::malware_hash_db::check_malware_hashes_fast(deep_scan).await
+                }));
+            }
+
             // Collect results
             for handle in handles {
                 if let Ok(Ok(mut detector_findings)) = handle.await {
@@ -231,13 +277,13 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
             }
         }
         ScanMode::Comprehensive => {
-            info!("Running comprehensive scan (all security checks)...\n");
+            info!("Running comprehensive scan (all security checks + expanded malware hash scan)...\n");
 
             // Run all fast checks
             findings.extend(run_fast_checks(is_root).await?);
 
             // Add comprehensive-only checks
-            let comp_handles = vec![
+            let mut comp_handles = vec![
                 tokio::spawn(cve_database_sqlite::check_cve_database()),
                 tokio::spawn(firewall::check_firewall()),
                 tokio::spawn(updates::check_security_updates()),
@@ -252,6 +298,14 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
                 tokio::spawn(container_security::check_container_security()), // Docker security
             ];
 
+            // Add comprehensive malware hash check (user dirs + web apps)
+            if !args.no_malware_db {
+                let deep_scan = args.deep_malware_scan;
+                comp_handles.push(tokio::spawn(async move {
+                    detectors::malware_hash_db::check_malware_hashes_comprehensive(deep_scan).await
+                }));
+            }
+
             for handle in comp_handles {
                 if let Ok(Ok(mut detector_findings)) = handle.await {
                     findings.append(&mut detector_findings);
@@ -264,7 +318,7 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
             // Run comprehensive checks
             findings.extend(run_fast_checks(is_root).await?);
 
-            let comp_handles = vec![
+            let mut comp_handles = vec![
                 tokio::spawn(cve_database_sqlite::check_cve_database()),
                 tokio::spawn(firewall::check_firewall()),
                 tokio::spawn(updates::check_security_updates()),
@@ -296,6 +350,14 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
                 tokio::spawn(detectors::memory_security::detect_memory_injection()), // Code injection
                 tokio::spawn(detectors::memory_security::check_core_dumps()), // Exploitation evidence
             ];
+
+            // Add malware hash database check (slow, only in deep mode)
+            if !args.no_malware_db {
+                let deep_scan = args.deep_malware_scan;
+                comp_handles.push(tokio::spawn(async move {
+                    detectors::malware_hash_db::check_malware_hashes(deep_scan).await
+                }));
+            }
 
             for handle in comp_handles {
                 if let Ok(Ok(mut detector_findings)) = handle.await {

@@ -15,26 +15,23 @@ use tracing::info;
 fn get_db_path() -> PathBuf {
     let system_path = PathBuf::from("/var/cache/linux-guardian/cve.db");
 
-    // Check if system path exists and is accessible
-    if system_path.exists() {
-        // If database exists, check if we can read and write to it
-        if std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&system_path)
-            .is_ok()
-        {
-            return system_path;
-        }
-        // Database exists but we don't have permissions - use user home
+    // Get user home path
+    let user_path = if let Ok(home) = std::env::var("HOME") {
+        let mut path = PathBuf::from(home);
+        path.push(".cache/linux-guardian/cve.db");
+        path
     } else {
-        // Try to create system path if we have permissions
-        if let Some(parent) = system_path.parent() {
-            if std::fs::create_dir_all(parent).is_ok()
+        PathBuf::from("./cve.db")
+    };
+
+    // Check if system path exists and has data
+    if system_path.exists() {
+        if let Ok(metadata) = std::fs::metadata(&system_path) {
+            // If system database is populated (>100KB), prefer it
+            if metadata.len() > 100_000
                 && std::fs::OpenOptions::new()
-                    .create(true)
+                    .read(true)
                     .write(true)
-                    .truncate(true)
                     .open(&system_path)
                     .is_ok()
             {
@@ -43,20 +40,36 @@ fn get_db_path() -> PathBuf {
         }
     }
 
-    // Fall back to user home directory
-    if let Ok(home) = std::env::var("HOME") {
-        let mut user_path = PathBuf::from(home);
-        user_path.push(".cache/linux-guardian/cve.db");
-
-        if let Some(parent) = user_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    // Check if user path exists and has data
+    if user_path.exists() {
+        if let Ok(metadata) = std::fs::metadata(&user_path) {
+            // If user database is populated (>100KB), use it
+            if metadata.len() > 100_000 {
+                return user_path;
+            }
         }
-
-        return user_path;
     }
 
-    // Last resort: current directory
-    PathBuf::from("./cve.db")
+    // Neither database has data - try to create in system location
+    if let Some(parent) = system_path.parent() {
+        if std::fs::create_dir_all(parent).is_ok()
+            && std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&system_path)
+                .is_ok()
+        {
+            return system_path;
+        }
+    }
+
+    // Fall back to user home directory
+    if let Some(parent) = user_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    user_path
 }
 
 /// Initialize CVE database

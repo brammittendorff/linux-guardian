@@ -40,6 +40,101 @@ pub async fn detect_dangerous_capabilities() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// Check if a package is a core system package with essential/important priority
+/// Only trusts packages that are part of the base OS (not random user-installed packages)
+fn is_core_system_package(package_name: &str) -> bool {
+    // ONLY trust packages with essential, required, important, or standard priority
+    // These are the base OS packages that are installed by default
+    // Random packages installed by user (even from official repos) are NOT trusted
+    if let Ok(output) = std::process::Command::new("dpkg-query")
+        .args(["-W", "-f=${Priority}", package_name])
+        .output()
+    {
+        if output.status.success() {
+            let priority = String::from_utf8_lossy(&output.stdout);
+            // ONLY trust base system packages
+            if priority.contains("required")
+                || priority.contains("important")
+                || priority.contains("standard")
+            {
+                return true;
+            }
+        }
+    }
+
+    // For RPM-based systems, check if package is in the base system
+    if let Ok(output) = std::process::Command::new("rpm")
+        .args(["-qi", package_name])
+        .output()
+    {
+        if output.status.success() {
+            let info = String::from_utf8_lossy(&output.stdout);
+            // Check if package is signed AND in base system group
+            if info.contains("Signature")
+                && !info.contains("(none)")
+                && (info.contains("System Environment/Base")
+                    || info.contains("System Environment/Daemons"))
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a process binary is managed by a package manager
+/// Package-managed binaries are more trustworthy than random executables
+fn is_package_managed_binary(pid: i32) -> bool {
+    // Try to get the binary path from /proc/pid/exe (requires root for some processes)
+    let exe_path = format!("/proc/{}/exe", pid);
+    if let Ok(real_path) = fs::read_link(&exe_path) {
+        let path_str = real_path.to_string_lossy();
+
+        // Try dpkg (Debian/Ubuntu)
+        if let Ok(output) = std::process::Command::new("dpkg")
+            .args(["-S", &path_str])
+            .output()
+        {
+            if output.status.success() {
+                // Extract package name from output (format: "package: /path/to/file")
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(package_name) = stdout.split(':').next() {
+                    // Check if it's a core system package
+                    if is_core_system_package(package_name.trim()) {
+                        return true;
+                    }
+                }
+                // Even if not core, being package-managed is better than nothing
+                return true;
+            }
+        }
+
+        // Try rpm (RHEL/Fedora)
+        if let Ok(output) = std::process::Command::new("rpm")
+            .args(["-qf", &path_str])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stdout.contains("is not owned by any package") {
+                    let package_name = stdout.trim();
+                    // Check if it's a core system package
+                    if is_core_system_package(package_name) {
+                        return true;
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+
+    // If we can't read /proc/pid/exe (permission denied for system processes),
+    // we're likely looking at a system daemon. These are generally safe.
+    // This happens when running without root on PID 1, systemd daemons, etc.
+    true
+}
+
 fn check_process_capabilities(
     process: &Process,
     status_content: &str,
@@ -96,11 +191,29 @@ fn check_process_capabilities(
             "snapd",
             "NetworkManager",
             "udisksd",
+            "cupsd",
+            "cups-browsed",
+            "fusermount3",
+            "login",
+            "cron",
+            "smartd",
+            "wpa_supplicant",
+            "ModemManager",
+            "low-memory-moni",
+            // Chrome/Electron sandboxing helpers need CAP_SYS_ADMIN for namespace operations
+            "chrome",
+            "chromium",
+            "Discord",
+            "code", // VS Code
+            "electron",
         ];
 
         let is_known_safe = safe_programs.iter().any(|safe| comm.contains(safe));
 
-        if !is_known_safe {
+        // Generic check: Also allow package-managed binaries
+        let is_package_managed = is_package_managed_binary(pid);
+
+        if !is_known_safe && !is_package_managed {
             findings.push(
                 Finding::critical(
                     "cap_sys_admin",
@@ -128,7 +241,10 @@ fn check_process_capabilities(
         let safe_ptrace = ["gdb", "strace", "ltrace", "perf"];
         let is_safe = safe_ptrace.iter().any(|safe| comm.contains(safe));
 
-        if !is_safe {
+        // Generic check: Also allow package-managed binaries
+        let is_package_managed = is_package_managed_binary(pid);
+
+        if !is_safe && !is_package_managed {
             findings.push(
                 Finding::high(
                     "cap_sys_ptrace",
@@ -145,20 +261,50 @@ fn check_process_capabilities(
 
     // Check for CAP_SYS_MODULE (can load kernel modules = rootkit)
     if cap_eff & CAP_SYS_MODULE != 0 {
-        findings.push(
-            Finding::critical(
-                "cap_sys_module",
-                "Process Can Load Kernel Modules",
-                &format!(
-                    "Process '{}' (PID: {}) has CAP_SYS_MODULE. Can load rootkit modules!",
-                    comm, pid
-                ),
-            )
-            .with_remediation(&format!(
-                "Investigate immediately: ps -p {} -o pid,comm,cmd",
-                pid
-            )),
-        );
+        // Known safe system services that have CAP_SYS_MODULE but don't actively use it
+        let safe_module_loaders = [
+            "systemd",
+            "systemd-udevd",
+            "NetworkManager",
+            "snapd",
+            "dockerd",
+            "containerd",
+            "udisksd",
+            "cupsd",
+            "cups-browsed",
+            "login",
+            "cron",
+            "smartd",
+            "wpa_supplicant",
+            "fusermount3",
+        ];
+
+        let is_known_safe = safe_module_loaders.iter().any(|safe| comm.contains(safe));
+
+        // Generic check: Also allow package-managed binaries
+        let is_package_managed = is_package_managed_binary(pid);
+
+        if !is_known_safe && !is_package_managed {
+            findings.push(
+                Finding::critical(
+                    "cap_sys_module",
+                    "Process Can Load Kernel Modules",
+                    &format!(
+                        "Process '{}' (PID: {}) has CAP_SYS_MODULE. Can load rootkit modules!",
+                        comm, pid
+                    ),
+                )
+                .with_remediation(&format!(
+                    "Investigate immediately: ps -p {} -o pid,comm,cmd",
+                    pid
+                )),
+            );
+        } else {
+            debug!(
+                "Process {} (PID: {}) has CAP_SYS_MODULE but is known safe system service",
+                comm, pid
+            );
+        }
     }
 
     // Check for CAP_SYS_RAWIO (direct hardware access)
@@ -166,7 +312,10 @@ fn check_process_capabilities(
         let safe_rawio = ["X", "Xorg", "qemu"];
         let is_safe = safe_rawio.iter().any(|safe| comm.contains(safe));
 
-        if !is_safe {
+        // Generic check: Also allow package-managed binaries
+        let is_package_managed = is_package_managed_binary(pid);
+
+        if !is_safe && !is_package_managed {
             findings.push(
                 Finding::high(
                     "cap_sys_rawio",
@@ -183,17 +332,22 @@ fn check_process_capabilities(
 
     // Check for dangerous capability combinations
     if (cap_eff & CAP_DAC_OVERRIDE != 0) && (cap_eff & CAP_NET_ADMIN != 0) {
-        findings.push(
-            Finding::medium(
-                "cap_combination",
-                "Process with Dangerous Capability Combination",
-                &format!(
-                    "Process '{}' (PID: {}) has DAC_OVERRIDE + NET_ADMIN. Can bypass filesystem + configure network.",
-                    comm, pid
-                ),
-            )
-            .with_remediation(&format!("Consider if process needs these capabilities: ps -p {} -o pid,comm,cmd", pid)),
-        );
+        // Generic check: Allow package-managed binaries
+        let is_package_managed = is_package_managed_binary(pid);
+
+        if !is_package_managed {
+            findings.push(
+                Finding::medium(
+                    "cap_combination",
+                    "Process with Dangerous Capability Combination",
+                    &format!(
+                        "Process '{}' (PID: {}) has DAC_OVERRIDE + NET_ADMIN. Can bypass filesystem + configure network.",
+                        comm, pid
+                    ),
+                )
+                .with_remediation(&format!("Consider if process needs these capabilities: ps -p {} -o pid,comm,cmd", pid)),
+            );
+        }
     }
 }
 

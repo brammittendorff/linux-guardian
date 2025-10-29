@@ -43,43 +43,58 @@ pub async fn detect_memory_injection() -> Result<Vec<Finding>> {
 }
 
 /// Detect if a process is likely a JIT compiler based on memory map characteristics
-fn is_jit_compiler(maps_content: &str, anonymous_rwx_count: usize) -> bool {
-    // JIT compilers have specific characteristics:
+fn is_jit_compiler(maps_content: &str, process_name: &str, anonymous_rwx_count: usize) -> bool {
+    let maps_lower = maps_content.to_lowercase();
+    let process_lower = process_name.to_lowercase();
 
-    // 1. Check for JIT-related libraries in memory maps FIRST
-    // If process has JIT libraries, it's legitimate regardless of RWX count
-    let jit_libraries = [
-        "libv8",             // V8 JavaScript engine (Chrome, Node.js, Electron)
-        "libjvm",            // Java Virtual Machine
-        "libmozjs",          // Mozilla SpiderMonkey (Firefox)
-        "libjavascriptcore", // WebKit JavaScriptCore
-        "libjsc",            // JavaScriptCore
-        "libqemu",           // QEMU emulator
-        "libwasm",           // WebAssembly
-        "mono",              // Mono .NET runtime
-        "dotnet",            // .NET runtime
-        "coreclr",           // .NET Core runtime
-        "libluajit",         // LuaJIT
-        "libpypy",           // PyPy JIT
-        "libruby",           // Ruby (YJIT/MJIT)
+    // Generic heuristic 1: Check for JIT-specific file patterns
+    // JIT engines typically have these artifacts
+    let jit_indicators = [
+        "v8_context_snapshot", // V8 snapshot files
+        "snapshot_blob",       // V8/Chromium
+        "icudtl.dat",          // Internationalization data (Chrome/Node.js/Electron)
+        ".node",               // Node.js native modules
+        "jvm",                 // Java Virtual Machine
+        "jre",                 // Java Runtime Environment
+        "hotspot",             // JVM JIT compiler
+        "mozjs",               // Mozilla JavaScript
+        "javascriptcore",      // WebKit JS engine
+        "luajit",              // Lua JIT
+        "pypy",                // Python JIT
+        "mono",                // .NET runtime
+        "dotnet",              // .NET
+        "coreclr",             // .NET Core
+        "qemu",                // QEMU emulator
+        "wasm",                // WebAssembly
+        "ruby",                // Ruby (potential JIT)
     ];
 
-    let maps_lower = maps_content.to_lowercase();
-    for lib in &jit_libraries {
-        if maps_lower.contains(lib) {
-            return true; // Definite JIT - has the library
+    for indicator in &jit_indicators {
+        if maps_lower.contains(indicator) {
+            return true;
+        }
+    }
+
+    // Generic heuristic 2: Look for process names that commonly use JIT
+    // Browsers, IDEs, language runtimes
+    let jit_process_patterns = [
+        "chrome", "chromium", "firefox", "safari", "edge", "code", "electron", "discord", "slack",
+        "teams", "spotify", "node", "java", "python", "ruby", "mono",
+    ];
+
+    for pattern in &jit_process_patterns {
+        if process_lower.contains(pattern) {
+            return true;
         }
     }
 
     // 2. Check if process has many anonymous RWX regions (JIT pattern)
-    // JIT compilers typically have 5-50+ regions for code generation
-    // 1-2 regions without JIT libraries = suspicious
-    if anonymous_rwx_count < 3 {
-        return false; // Too few and no JIT libraries = likely actual injection
+    // If it has 5+ RWX regions, it's almost certainly a JIT compiler
+    if anonymous_rwx_count >= 5 {
+        return true;
     }
 
-    // 3. Check if process has many anonymous regions (not just RWX)
-    // Count total anonymous regions
+    // 3. Count total anonymous regions to detect JIT behavior
     let total_anonymous = maps_content
         .lines()
         .filter(|line| {
@@ -92,10 +107,15 @@ fn is_jit_compiler(maps_content: &str, anonymous_rwx_count: usize) -> bool {
         })
         .count();
 
-    // JIT compilers typically have many anonymous regions (50+)
-    // Regular programs have very few (< 10)
-    if total_anonymous > 20 && anonymous_rwx_count >= 3 {
-        return true; // Many anonymous regions + multiple RWX = likely JIT
+    // If process has MANY anonymous regions (50+), even with 1-2 RWX = likely JIT
+    // JIT compilers allocate many code pages
+    if total_anonymous >= 50 && anonymous_rwx_count > 0 {
+        return true;
+    }
+
+    // 4. Medium number of anonymous regions + some RWX = possible JIT
+    if total_anonymous >= 20 && anonymous_rwx_count >= 3 {
+        return true;
     }
 
     false
@@ -158,9 +178,13 @@ fn check_memory_maps(
     // Report anonymous RWX memory once per process with count
     if anonymous_rwx_count > 0 {
         // Detect if this is likely a JIT compiler
-        let is_likely_jit = is_jit_compiler(maps_content, anonymous_rwx_count);
+        let is_likely_jit = is_jit_compiler(maps_content, &comm, anonymous_rwx_count);
 
-        if !is_likely_jit {
+        // Single RWX region is often from legitimate native libraries (Python extensions, etc.)
+        // Multiple RWX regions are much more suspicious
+        let is_suspicious = anonymous_rwx_count >= 2;
+
+        if !is_likely_jit && is_suspicious {
             findings.push(
                 Finding::critical(
                     "memory_injection",
@@ -186,7 +210,7 @@ fn check_memory_maps(
     // Writable + executable memory in legitimate programs is rare
     if has_rwx_memory && rwx_regions.len() > 2 {
         // Detect if this is likely a JIT compiler
-        let is_likely_jit = is_jit_compiler(maps_content, anonymous_rwx_count);
+        let is_likely_jit = is_jit_compiler(maps_content, &comm, anonymous_rwx_count);
 
         if !is_likely_jit {
             findings.push(
@@ -211,18 +235,28 @@ fn check_memory_maps(
     }
 
     // Executable heap is almost always malicious
+    // Exception: JIT compilers legitimately use executable heap for code generation
     if has_heap_executable {
-        findings.push(
-            Finding::critical(
-                "executable_heap",
-                "Process with Executable Heap",
-                &format!(
-                    "Process '{}' (PID: {}) has executable heap. Clear sign of exploitation/injection!",
-                    comm, pid
-                ),
-            )
-            .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid)),
-        );
+        let is_likely_jit = is_jit_compiler(maps_content, &comm, anonymous_rwx_count);
+
+        if !is_likely_jit {
+            findings.push(
+                Finding::critical(
+                    "executable_heap",
+                    "Process with Executable Heap",
+                    &format!(
+                        "Process '{}' (PID: {}) has executable heap. Clear sign of exploitation/injection!",
+                        comm, pid
+                    ),
+                )
+                .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid)),
+            );
+        } else {
+            debug!(
+                "Process {} (PID: {}) has executable heap but appears to be JIT compiler",
+                comm, pid
+            );
+        }
     }
 
     // Executable stack (common in exploits)

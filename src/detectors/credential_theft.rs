@@ -11,39 +11,67 @@ use tracing::{debug, info};
 /// Sensitive credential locations (what attackers target)
 const CREDENTIAL_LOCATIONS: &[(&str, &str)] = &[
     // Browser cookies & passwords
-    (
-        "~/.config/google-chrome/Default/Cookies",
-        "Chrome cookies database",
-    ),
+    ("~/.config/google-chrome/Default/Cookies", "Chrome cookies"),
     (
         "~/.config/google-chrome/Default/Login Data",
-        "Chrome saved passwords",
+        "Chrome passwords",
     ),
-    ("~/.mozilla/firefox/*/cookies.sqlite", "Firefox cookies"),
-    (
-        "~/.mozilla/firefox/*/logins.json",
-        "Firefox saved passwords",
-    ),
+    ("~/.config/chromium/Default/Cookies", "Chromium cookies"),
     (
         "~/.config/BraveSoftware/Brave-Browser/Default/Cookies",
         "Brave cookies",
     ),
+    ("~/.config/microsoft-edge/Default/Cookies", "Edge cookies"),
+    // Firefox uses profile directories - check parent dir
+    ("~/.mozilla/firefox", "Firefox profile data"),
     // SSH keys
     ("~/.ssh/id_rsa", "SSH private key"),
     ("~/.ssh/id_ed25519", "SSH private key"),
     ("~/.ssh/id_ecdsa", "SSH private key"),
+    ("~/.ssh/id_dsa", "SSH private key"),
     // Cloud provider credentials
     ("~/.aws/credentials", "AWS credentials"),
+    ("~/.aws/config", "AWS config"),
     ("~/.azure/credentials", "Azure credentials"),
-    ("~/.config/gcloud/credentials", "Google Cloud credentials"),
+    ("~/.config/gcloud/credentials.db", "GCP credentials"),
+    (
+        "~/.config/gcloud/legacy_credentials",
+        "GCP legacy credentials",
+    ),
     ("~/.kube/config", "Kubernetes credentials"),
+    (
+        "~/.terraform.d/credentials.tfrc.json",
+        "Terraform Cloud credentials",
+    ),
+    ("~/.config/doctl/config.yaml", "DigitalOcean credentials"),
     // Password managers
     ("~/.password-store", "pass password manager"),
     ("~/.local/share/keyrings", "GNOME Keyring"),
+    ("~/.gnupg", "GPG keys"),
     // Git credentials
-    ("~/.git-credentials", "Git stored credentials"),
-    // Docker
+    ("~/.git-credentials", "Git credentials"),
+    ("~/.gitconfig", "Git config (may contain tokens)"),
+    // Development tools
     ("~/.docker/config.json", "Docker registry credentials"),
+    ("~/.npmrc", "npm credentials"),
+    ("~/.yarnrc.yml", "Yarn credentials"),
+    ("~/.pypirc", "PyPI credentials"),
+    ("~/.cargo/credentials.toml", "Cargo registry credentials"),
+    ("~/.gem/credentials", "RubyGems credentials"),
+    ("~/.m2/settings.xml", "Maven credentials"),
+    // Database clients
+    ("~/.pgpass", "PostgreSQL password file"),
+    ("~/.my.cnf", "MySQL credentials"),
+    ("~/.mongorc.js", "MongoDB credentials"),
+    // VS Code
+    (
+        "~/.vscode/extensions",
+        "VS Code extensions (may contain tokens)",
+    ),
+    ("~/.config/Code/User/settings.json", "VS Code settings"),
+    // Slack/Discord
+    ("~/.config/Slack/Cookies", "Slack cookies"),
+    ("~/.config/discord/Local Storage", "Discord tokens"),
 ];
 
 /// Detect processes accessing credential stores
@@ -94,11 +122,16 @@ pub async fn detect_credential_theft() -> Result<Vec<Finding>> {
                         // Check if accessing any sensitive path
                         for sensitive_path in &sensitive_paths {
                             if link_str.contains(sensitive_path) {
-                                suspicious_accesses.insert((pid, comm.clone()));
-                                debug!(
-                                    "Process {} (PID {}) accessing {}",
-                                    comm, pid, sensitive_path
-                                );
+                                // IMPORTANT: Only flag if process is accessing ANOTHER app's credentials
+                                // e.g., Discord accessing Discord tokens = OK
+                                //       Discord accessing Chrome cookies = SUSPICIOUS
+                                if !is_accessing_own_credentials(&comm, &link_str) {
+                                    suspicious_accesses.insert((pid, comm.clone()));
+                                    debug!(
+                                        "Process {} (PID {}) accessing {}",
+                                        comm, pid, sensitive_path
+                                    );
+                                }
                             }
                         }
                     }
@@ -130,27 +163,90 @@ pub async fn detect_credential_theft() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// Check if a process is accessing its own credentials (not suspicious)
+/// e.g., Discord accessing ~/.config/discord/ is OK
+fn is_accessing_own_credentials(process_name: &str, file_path: &str) -> bool {
+    let proc_lower = process_name.to_lowercase();
+    let path_lower = file_path.to_lowercase();
+
+    // Map of process names to their credential directories
+    let own_credential_patterns = [
+        ("chrome", vec!["google-chrome", "chromium"]),
+        ("chromium", vec!["chromium"]),
+        ("brave", vec!["bravesoftware"]),
+        ("firefox", vec!["mozilla/firefox"]),
+        ("msedge", vec!["microsoft-edge"]),
+        ("discord", vec!["discord"]),
+        ("slack", vec!["slack"]),
+        ("code", vec!["code", ".vscode"]),
+        ("vscode", vec!["code", ".vscode"]),
+    ];
+
+    // Check if process is accessing its own config directory
+    for (proc_pattern, path_patterns) in &own_credential_patterns {
+        if proc_lower.contains(proc_pattern) {
+            for path_pattern in path_patterns {
+                if path_lower.contains(path_pattern) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Check if process legitimately accesses credentials
 fn is_legitimate_credential_accessor(comm: &str) -> bool {
+    let comm_lower = comm.to_lowercase();
+
     let legitimate = [
+        // Browsers
         "chrome",
         "chromium",
         "firefox",
         "brave",
+        "msedge",
+        "safari",
+        // Password managers / keyrings
         "gnome-keyring",
         "kwallet",
+        "1password",
+        "lastpass",
+        "bitwarden",
         "ssh-agent",
         "gpg-agent",
         "pass",
+        "seahorse",
+        // Cloud CLI tools
         "aws",
         "gcloud",
+        "az",
         "kubectl",
         "docker",
+        "terraform",
+        "doctl",
+        "heroku",
+        // Development tools
+        "code",
+        "vscode",
+        "nvim",
+        "vim",
+        "nano",
+        "git",
+        // Backup tools
+        "rsync",
+        "rclone",
+        "duplicity",
+        "restic",
+        // System services
+        "systemd",
+        "dbus",
+        // Security scanners (checking file permissions)
+        "linux-guardian",
     ];
 
-    legitimate
-        .iter()
-        .any(|&app| comm.to_lowercase().contains(app))
+    legitimate.iter().any(|&app| comm_lower.contains(app))
 }
 
 /// Check for credential files with weak permissions

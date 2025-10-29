@@ -216,13 +216,42 @@ pub async fn check_module_parameters() -> Result<Vec<Finding>> {
                         let param_name = param_entry.file_name();
                         let param_name_str = param_name.to_string_lossy();
 
-                        // Suspicious parameter names
-                        if param_name_str.contains("hide")
-                            || param_name_str.contains("stealth")
-                            || param_name_str.contains("debug")
-                            || param_name_str.contains("root")
-                        {
-                            if let Ok(value) = fs::read_to_string(param_entry.path()) {
+                        // Check for truly suspicious parameters
+                        // Only flag if the parameter is actually ENABLED (not just exists)
+                        if let Ok(value) = fs::read_to_string(param_entry.path()) {
+                            let value_trimmed = value.trim();
+
+                            // Rootkit-style parameters - but only if ENABLED
+                            let always_suspicious = (param_name_str.contains("hide")
+                                || param_name_str.contains("stealth"))
+                                && (value_trimmed != "0"
+                                    && value_trimmed != "N"
+                                    && !value_trimmed.is_empty());
+
+                            // Backdoor parameters - flag if enabled
+                            let backdoor_enabled = param_name_str.contains("backdoor")
+                                && (value_trimmed != "0"
+                                    && value_trimmed != "N"
+                                    && value_trimmed != "n"
+                                    && !value_trimmed.is_empty());
+
+                            // Debug parameters are only suspicious if ENABLED
+                            let debug_enabled = (param_name_str.contains("debug")
+                                || param_name_str.contains("verbose"))
+                                && (value_trimmed != "0"
+                                    && value_trimmed != "N"
+                                    && !value_trimmed.is_empty());
+
+                            // Root-related parameters enabled
+                            let root_enabled = param_name_str.contains("root")
+                                && value_trimmed != "0"
+                                && value_trimmed != "N";
+
+                            if always_suspicious
+                                || backdoor_enabled
+                                || (debug_enabled && !param_name_str.contains("nodebug"))
+                                || root_enabled
+                            {
                                 findings.push(
                                     Finding::medium(
                                         "suspicious_module_param",
@@ -231,7 +260,7 @@ pub async fn check_module_parameters() -> Result<Vec<Finding>> {
                                             "Module '{}' has suspicious parameter '{}' = '{}'",
                                             module_name.to_string_lossy(),
                                             param_name_str,
-                                            value.trim()
+                                            value_trimmed
                                         ),
                                     )
                                     .with_remediation("Investigate module behavior"),

@@ -80,50 +80,33 @@ pub fn find_matching_cves(conn: &Connection, product: &str, version: &str) -> Re
             }
         }
 
-        // Filter out CVEs clearly about other platforms or products
+        // Generic filter: skip CVEs about other platforms
         let desc_lower = cve.description.to_lowercase();
         let irrelevant_keywords = [
-            "windows",
-            "android",
-            "ios",
-            "macos",
-            "solaris",
-            "aix",
-            "hpux",
-            "junos",
-            "cisco ios",
-            "qualcomm",
-            "snapdragon",
-            "totolink router",
-            "wordpress plugin",
-            "drupal",
-            "joomla",
-            "phpmailer",
-            "wordpress",
-            "discord bot",
-            "printer",
-            "appliance",
-            "dram chip",
-            "rowhammer",
-            "enttec",
-            "kace",
-            "kramerav",
-            "gipsy",
-            "vasion",
-            "zabbix",
-            "ucms",
+            "windows", "android", "ios", "macos", "solaris", "aix", "hpux",
         ];
 
         if irrelevant_keywords.iter().any(|k| desc_lower.contains(k)) {
             debug!(
-                "Skipping {} - description contains irrelevant keyword",
+                "Skipping {} - description contains irrelevant OS",
                 cve.cve_id
             );
             continue;
         }
 
+        // CRITICAL: Only proceed if CVE has CPE matches that actually reference this product
+        // This is the generic solution - filters out CVEs that mention the product
+        // but are actually about other software
+        if !has_relevant_cpe_matches(conn, &cve.cve_id, product)? {
+            debug!(
+                "Skipping {} - CPE doesn't match product '{}' (false positive)",
+                cve.cve_id, product
+            );
+            continue;
+        }
+
         // Check if version is vulnerable using CPE matches
-        if is_version_vulnerable(conn, &cve.cve_id, version)? {
+        if is_version_vulnerable(conn, &cve.cve_id, product, version)? {
             findings.push(create_finding_from_cve(&cve, product, version));
         }
     }
@@ -143,40 +126,104 @@ struct CveRow {
     ransomware_use: bool,
 }
 
-/// Check if a version is vulnerable based on CPE version ranges
-fn is_version_vulnerable(conn: &Connection, cve_id: &str, version: &str) -> Result<bool> {
-    // Check if there are CPE matches for this CVE
+/// Check if a CVE has CPE matches that actually reference this product
+/// This is the key to filtering false positives - only trust CVEs where
+/// the CPE criteria mentions the actual product we're checking
+fn has_relevant_cpe_matches(conn: &Connection, cve_id: &str, product: &str) -> Result<bool> {
     let mut stmt = conn.prepare(
-        "SELECT version_start_including, version_start_excluding,
+        "SELECT cpe_criteria FROM cpe_matches
+         WHERE cve_id = ?
+         AND (version_start_including IS NOT NULL
+              OR version_start_excluding IS NOT NULL
+              OR version_end_including IS NOT NULL
+              OR version_end_excluding IS NOT NULL)",
+    )?;
+
+    let cpe_iter = stmt.query_map([cve_id], |row| row.get::<_, String>(0))?;
+
+    // Check if ANY CPE criteria mentions this product
+    // CPE format: cpe:2.3:a:vendor:product:version:...
+    let product_lower = product.to_lowercase().replace("-", "_");
+
+    for cpe in cpe_iter.flatten() {
+        let cpe_lower = cpe.to_lowercase();
+
+        // Extract product from CPE (5th field after splitting by ':')
+        let parts: Vec<&str> = cpe_lower.split(':').collect();
+        if parts.len() >= 5 {
+            let cpe_product = parts[4];
+
+            // IMPORTANT: Use exact match, not substring match
+            // "linux" should NOT match "anti-virus_for_linux_server"
+            // But "linux_kernel" should match "linux_kernel"
+            if cpe_product == product_lower {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// Check if a version is vulnerable based on CPE version ranges
+fn is_version_vulnerable(
+    conn: &Connection,
+    cve_id: &str,
+    product: &str,
+    version: &str,
+) -> Result<bool> {
+    // IMPORTANT: Only check CPE matches that have actual version constraints
+    // AND that match the product we're checking (to avoid matching against
+    // other products' version ranges, e.g., openssh vs mac_os_x)
+    let mut stmt = conn.prepare(
+        "SELECT cpe_criteria, version_start_including, version_start_excluding,
                 version_end_including, version_end_excluding
          FROM cpe_matches
-         WHERE cve_id = ? AND vulnerable = 1",
+         WHERE cve_id = ? AND vulnerable = 1
+         AND (version_start_including IS NOT NULL
+              OR version_start_excluding IS NOT NULL
+              OR version_end_including IS NOT NULL
+              OR version_end_excluding IS NOT NULL)",
     )?;
 
     let matches = stmt.query_map([cve_id], |row| {
         Ok(CpeVersionRange {
-            start_including: row.get(0)?,
-            start_excluding: row.get(1)?,
-            end_including: row.get(2)?,
-            end_excluding: row.get(3)?,
+            cpe_criteria: row.get(0)?,
+            start_including: row.get(1)?,
+            start_excluding: row.get(2)?,
+            end_including: row.get(3)?,
+            end_excluding: row.get(4)?,
         })
     })?;
 
     let version_parsed = parse_version(version);
+    let product_lower = product.to_lowercase().replace("-", "_");
 
     for range in matches.flatten() {
-        if version_matches_range(&version_parsed, &range) {
-            return Ok(true);
+        // CRITICAL FIX: Only check version ranges for CPE entries that match this product
+        // CPE format: cpe:2.3:a:vendor:product:version:...
+        // Extract product from CPE (5th field after splitting by ':')
+        let cpe_lower = range.cpe_criteria.to_lowercase();
+        let parts: Vec<&str> = cpe_lower.split(':').collect();
+
+        if parts.len() >= 5 {
+            let cpe_product = parts[4];
+
+            // Only check this range if CPE product matches our product (exact match)
+            // IMPORTANT: "linux" should NOT match "anti-virus_for_linux_server"
+            if cpe_product == product_lower && version_matches_range(&version_parsed, &range) {
+                return Ok(true);
+            }
         }
     }
 
-    // If no CPE ranges defined, don't assume vulnerable
-    // This prevents false positives from broad product name matching
+    // If no matching CPE ranges, don't match
     Ok(false)
 }
 
 #[derive(Debug)]
 struct CpeVersionRange {
+    cpe_criteria: String,
     start_including: Option<String>,
     start_excluding: Option<String>,
     end_including: Option<String>,
@@ -293,6 +340,7 @@ mod tests {
         let version = vec![1, 9, 15];
 
         let range1 = CpeVersionRange {
+            cpe_criteria: "cpe:2.3:a:vendor:product:*:*:*:*:*:*:*:*".to_string(),
             start_including: Some("1.9.14".to_string()),
             start_excluding: None,
             end_including: Some("1.9.17".to_string()),
@@ -302,6 +350,7 @@ mod tests {
         assert!(version_matches_range(&version, &range1));
 
         let range2 = CpeVersionRange {
+            cpe_criteria: "cpe:2.3:a:vendor:product:*:*:*:*:*:*:*:*".to_string(),
             start_including: Some("1.9.16".to_string()),
             start_excluding: None,
             end_including: None,

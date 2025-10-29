@@ -133,6 +133,29 @@ struct NvdCveItem {
     published: String,
     #[serde(rename = "lastModified")]
     last_modified: String,
+    configurations: Option<Vec<NvdConfiguration>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NvdConfiguration {
+    nodes: Vec<NvdNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NvdNode {
+    #[serde(rename = "cpeMatch")]
+    cpe_match: Option<Vec<NvdCpeMatch>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NvdCpeMatch {
+    vulnerable: bool,
+    criteria: String,
+    version_start_including: Option<String>,
+    version_start_excluding: Option<String>,
+    version_end_including: Option<String>,
+    version_end_excluding: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +299,37 @@ pub async fn download_nvd_critical(conn: &Connection) -> Result<()> {
                                                 false,
                                                 "NVD",
                                             )?;
+
+                                            // Insert CPE matches (version ranges)
+                                            if let Some(configs) = &cve.configurations {
+                                                for config in configs {
+                                                    for node in &config.nodes {
+                                                        if let Some(cpe_matches) = &node.cpe_match {
+                                                            for cpe_match in cpe_matches {
+                                                                if cpe_match.vulnerable {
+                                                                    schema::insert_cpe_match(
+                                                                        conn,
+                                                                        &cve.id,
+                                                                        &cpe_match.criteria,
+                                                                        cpe_match
+                                                                            .version_start_including
+                                                                            .as_deref(),
+                                                                        cpe_match
+                                                                            .version_start_excluding
+                                                                            .as_deref(),
+                                                                        cpe_match
+                                                                            .version_end_including
+                                                                            .as_deref(),
+                                                                        cpe_match
+                                                                            .version_end_excluding
+                                                                            .as_deref(),
+                                                                    )?;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
 
                                             severity_imported += 1;
                                             total_imported += 1;

@@ -14,6 +14,7 @@ pub mod file_permissions;
 pub mod firewall;
 pub mod kernel_hardening;
 pub mod kernel_modules;
+pub mod malware_hash_db;
 pub mod malware_hashes;
 pub mod mandatory_access_control;
 pub mod memory_security;
