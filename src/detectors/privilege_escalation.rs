@@ -81,7 +81,75 @@ pub async fn check_sudo_vulnerabilities() -> Result<Vec<Finding>> {
 
 /// Check if a binary is part of an installed package
 /// Returns Some(package_name) if it's packaged, None otherwise
+/// This function resolves symlinks recursively to handle chains like:
+/// /usr/sbin/mount.ntfs -> mount.ntfs-3g -> /bin/ntfs-3g
+/// It also handles hardlinks where /usr/bin/foo and /bin/foo are the same file
 fn check_if_packaged(path: &str) -> Option<String> {
+    // First, try to check the path as-is
+    if let Some(pkg) = check_path_with_package_manager(path) {
+        return Some(pkg);
+    }
+
+    // Use canonicalize to resolve ALL symlinks recursively to the final target
+    if let Ok(canonical_path) = fs::canonicalize(path) {
+        let canonical_str = canonical_path.to_string_lossy().to_string();
+
+        // Only check if it's different from the original path
+        if canonical_str != path {
+            debug!("Resolved symlink chain {} -> {}", path, canonical_str);
+            if let Some(pkg) = check_path_with_package_manager(&canonical_str) {
+                return Some(pkg);
+            }
+
+            // For hardlinked binaries, dpkg may only track one of /bin/foo or /usr/bin/foo
+            // Try alternative common paths
+            let alternate_paths = get_alternate_paths(&canonical_str);
+            for alt_path in alternate_paths {
+                if let Some(pkg) = check_path_with_package_manager(&alt_path) {
+                    debug!(
+                        "Found package via alternate path: {} -> {}",
+                        canonical_str, alt_path
+                    );
+                    return Some(pkg);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Get alternate paths for common binary locations
+/// e.g., /usr/bin/foo -> [/bin/foo], /bin/foo -> [/usr/bin/foo]
+fn get_alternate_paths(path: &str) -> Vec<String> {
+    let mut alternates = Vec::new();
+
+    if let Some(filename) = std::path::Path::new(path).file_name() {
+        let filename_str = filename.to_string_lossy();
+
+        // /usr/bin/foo -> /bin/foo
+        if path.starts_with("/usr/bin/") {
+            alternates.push(format!("/bin/{}", filename_str));
+        }
+        // /bin/foo -> /usr/bin/foo
+        else if path.starts_with("/bin/") {
+            alternates.push(format!("/usr/bin/{}", filename_str));
+        }
+        // /usr/sbin/foo -> /sbin/foo
+        else if path.starts_with("/usr/sbin/") {
+            alternates.push(format!("/sbin/{}", filename_str));
+        }
+        // /sbin/foo -> /usr/sbin/foo
+        else if path.starts_with("/sbin/") {
+            alternates.push(format!("/usr/sbin/{}", filename_str));
+        }
+    }
+
+    alternates
+}
+
+/// Check a specific path with package managers (helper function)
+fn check_path_with_package_manager(path: &str) -> Option<String> {
     // Try dpkg (Debian/Ubuntu)
     if let Ok(output) = Command::new("dpkg").arg("-S").arg(path).output() {
         if output.status.success() {
