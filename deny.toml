@@ -12,41 +12,44 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 # The url(s) of the advisory databases to use
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Vulnerability severity threshold
-# Options: none, low, medium, high, critical
-vulnerability = "deny"
-# Crates with security notices
-notice = "warn"
-# Unsound crates
-unsound = "warn"
 # Yanked crates from crates.io
 yanked = "deny"
+# How to handle unmaintained crate advisories
+# Options: all (default), workspace, transitive, none
+unmaintained = "all"
 
 # Ignore specific advisories (use sparingly!)
 ignore = [
     # Example: "RUSTSEC-2020-0001",
 ]
 
+# NOTE: As of cargo-deny 0.16+, vulnerability, notice, and unsound advisories
+# are all denied by default and cannot be configured to warn/allow.
+# Use the 'ignore' field above to suppress specific advisories if needed.
+
 [licenses]
 version = 2
-# Allow these licenses
+# Allow these licenses (all others are denied by default in cargo-deny 0.16+)
 allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unlicense",
-    "0BSD",
+    # Unicode licenses (used by ICU crates for internationalization)
+    "Unicode-3.0",
+    # Mozilla Public License (used by colored crate)
+    "MPL-2.0",
+    # Zlib license (used by foldhash)
+    "Zlib",
+    # Community Data License Agreement (used by webpki-roots for TLS root certificates)
+    "CDLA-Permissive-2.0",
 ]
-# Deny these licenses
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-3.0",
-]
+# NOTE: As of cargo-deny 0.16+, the 'deny' field has been removed.
+# All licenses not in the 'allow' list are automatically denied.
+# GPL-2.0, GPL-3.0, and AGPL-3.0 are already denied by not being in 'allow'.
+
 # Confidence threshold for license detection
 confidence-threshold = 0.8
 # Allow licenses only for specific crates
