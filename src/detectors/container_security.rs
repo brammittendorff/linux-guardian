@@ -4,8 +4,10 @@ use crate::models::Finding;
 use anyhow::Result;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info};
+use walkdir::WalkDir;
 
 /// Check Docker/container security
 pub async fn check_container_security() -> Result<Vec<Finding>> {
@@ -170,38 +172,128 @@ async fn check_dangerous_mounts() -> Result<Vec<Finding>> {
             if let Ok(inspect_output) = inspect {
                 let mounts = String::from_utf8_lossy(&inspect_output.stdout);
 
-                // Dangerous mounts
-                let dangerous_paths = [
-                    "/", // Root filesystem
-                    "/etc",
-                    "/var/run/docker.sock", // Docker socket
-                    "/proc",
-                    "/sys",
-                ];
+                // Parse mount format from docker inspect: [{bind SOURCE DEST FLAGS...}]
+                // Extract the source paths from the mount info
+                for mount_entry in mounts.split("}{") {
+                    // Format: {bind /host/path /container/path rw...}
+                    let parts: Vec<&str> = mount_entry.split_whitespace().collect();
 
-                for dangerous_path in &dangerous_paths {
-                    if mounts.contains(dangerous_path) {
-                        findings.push(
-                            Finding::critical(
-                                "container_security",
-                                "Container Has Dangerous Mount",
-                                &format!(
-                                    "Container '{}' mounts {} from host. This allows container escape!",
-                                    container_name, dangerous_path
-                                ),
-                            )
-                            .with_remediation(&format!(
-                                "Remove dangerous mount from container '{}'. Never mount / or /var/run/docker.sock",
-                                container_name
-                            )),
-                        );
+                    if parts.len() >= 3 && parts[0].contains("bind") {
+                        let source_path =
+                            parts[1].trim_matches(|c| c == '{' || c == '[' || c == '}' || c == ']');
+
+                        // Check for dangerous host paths being mounted
+                        let dangerous_paths = [
+                            ("/", "root filesystem"),
+                            ("/etc", "system config directory"),
+                            ("/var/run/docker.sock", "Docker socket"),
+                            ("/proc", "process info directory"),
+                            ("/sys", "system info directory"),
+                            ("/root", "root home directory"),
+                            ("/boot", "boot partition"),
+                        ];
+
+                        for (dangerous_path, description) in &dangerous_paths {
+                            // Exact match or starts with path (e.g., /etc/passwd)
+                            if source_path == *dangerous_path
+                                || source_path.starts_with(&format!("{}/", dangerous_path))
+                            {
+                                findings.push(
+                                    Finding::critical(
+                                        "container_security",
+                                        "Container Has Dangerous Mount",
+                                        &format!(
+                                            "Container '{}' mounts {} ({}) from host. This allows container escape!",
+                                            container_name, source_path, description
+                                        ),
+                                    )
+                                    .with_remediation(&format!(
+                                        "Remove dangerous mount from container '{}'. Never mount {} or /var/run/docker.sock",
+                                        container_name, dangerous_path
+                                    )),
+                                );
+                                break; // Only report once per mount
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
+    // Also scan docker-compose.yml files in common locations
+    findings.extend(scan_docker_compose_files().await);
+
     Ok(findings)
+}
+
+/// Scan docker-compose.yml files for dangerous mounts
+async fn scan_docker_compose_files() -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    // Common locations for docker-compose files
+    let search_dirs = [
+        std::env::var("HOME").ok().map(|h| format!("{}/work", h)),
+        std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{}/projects", h)),
+        Some("/opt".to_string()),
+        Some("/srv".to_string()),
+    ];
+
+    for search_dir in search_dirs.iter().filter_map(|d| d.as_ref()) {
+        let path = Path::new(search_dir);
+        if !path.exists() {
+            continue;
+        }
+
+        // Find all docker-compose.yml files
+        for entry in WalkDir::new(path)
+            .max_depth(4)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let file_path = entry.path();
+            if file_path.file_name().and_then(|n| n.to_str()) == Some("docker-compose.yml")
+                || file_path.file_name().and_then(|n| n.to_str()) == Some("docker-compose.yaml")
+            {
+                if let Ok(content) = fs::read_to_string(file_path) {
+                    // Check for dangerous volume mounts
+                    let dangerous_mounts = [
+                        ("- /:/", "root filesystem"),
+                        ("- /etc:", "system config"),
+                        ("- /var/run/docker.sock:", "Docker socket"),
+                        ("- /proc:", "process info"),
+                        ("- /sys:", "system info"),
+                        ("- /root:", "root home"),
+                        ("- /boot:", "boot partition"),
+                    ];
+
+                    for (pattern, description) in &dangerous_mounts {
+                        if content.contains(pattern) {
+                            findings.push(
+                                Finding::critical(
+                                    "container_security",
+                                    "Dangerous Mount in docker-compose.yml",
+                                    &format!(
+                                        "File {} contains dangerous mount: {}. This allows container escape!",
+                                        file_path.display(),
+                                        description
+                                    ),
+                                )
+                                .with_remediation(&format!(
+                                    "Edit {} and remove dangerous mount. Never mount system directories.",
+                                    file_path.display()
+                                )),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    findings
 }
 
 /// Check Docker daemon configuration

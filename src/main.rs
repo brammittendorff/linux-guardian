@@ -259,6 +259,7 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
                 tokio::spawn(ssh::detect_brute_force_attempts()),
                 tokio::spawn(process::detect_suspicious_processes()),
                 tokio::spawn(network::analyze_connections()),
+                tokio::spawn(network::analyze_traffic_patterns()),
             ];
 
             // Add fast malware hash check (only /tmp, /var/tmp, /dev/shm)
@@ -382,6 +383,7 @@ async fn run_fast_checks(is_root: bool) -> Result<Vec<linux_guardian::models::Fi
         tokio::spawn(detectors::ssh::detect_brute_force_attempts()),
         tokio::spawn(detectors::process::detect_suspicious_processes()),
         tokio::spawn(detectors::network::analyze_connections()),
+        tokio::spawn(detectors::network::analyze_traffic_patterns()),
     ];
 
     for handle in handles {
