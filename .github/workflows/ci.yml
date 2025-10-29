@@ -97,38 +97,53 @@ jobs:
         if: matrix.install_deps == 'apt'
         run: |
           apt-get update
-          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash
 
       - name: Install dependencies (Fedora/Rocky)
         if: matrix.install_deps == 'dnf'
         run: |
-          dnf install -y curl gcc gcc-c++ make pkgconfig openssl-devel git ca-certificates
+          dnf install -y curl gcc gcc-c++ make pkgconfig openssl-devel git ca-certificates bash
 
       - name: Install dependencies (Alpine)
         if: matrix.install_deps == 'apk'
         run: |
-          apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev
+          apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash
 
       - name: Install dependencies (Arch)
         if: matrix.install_deps == 'pacman'
         run: |
-          pacman -Syu --noconfirm curl base-devel openssl git ca-certificates
+          pacman -Syu --noconfirm curl base-devel openssl git ca-certificates bash
 
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
-      - name: Install Rust
+      - name: Install Rust (GitHub Action)
+        if: matrix.container == ''
         uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # stable
         with:
           toolchain: stable
 
+      - name: Install Rust (rustup in container)
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Build debug
-        run: cargo build --verbose
+        shell: bash
+        run: |
+          if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
+          cargo build --verbose
 
       - name: Build release
-        run: cargo build --release --verbose
+        shell: bash
+        run: |
+          if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
+          cargo build --release --verbose
 
       - name: Test binary
+        shell: bash
         run: |
           ./target/release/linux-guardian --help
           ./target/release/linux-guardian --version
