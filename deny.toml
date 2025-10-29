@@ -34,12 +34,17 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unlicense",
-    "0BSD",
+    # Unicode licenses (used by ICU crates for internationalization)
+    "Unicode-3.0",
+    # Mozilla Public License (used by colored crate)
+    "MPL-2.0",
+    # Zlib license (used by foldhash)
+    "Zlib",
+    # Community Data License Agreement (used by webpki-roots for TLS root certificates)
+    "CDLA-Permissive-2.0",
 ]
 # NOTE: As of cargo-deny 0.16+, the 'deny' field has been removed.
 # All licenses not in the 'allow' list are automatically denied.
