@@ -104,8 +104,11 @@ linux-guardian --show-privilege-info
 ### Quiet mode (only show problems)
 
 ```bash
-linux-guardian --quiet              # Works without root
-sudo linux-guardian --quiet         # With root for complete scan
+linux-guardian --quiet    # Works without root
+```
+
+```bash
+sudo linux-guardian --quiet    # With root for complete scan
 ```
 
 ### Show only active threats
@@ -190,7 +193,7 @@ linux-guardian --min-severity critical  # Only critical (works without root)
 
 ```bash
 # Update CVE database (do this weekly, needs root for system-wide cache)
-sudo linux-guardian --update-cve-db
+linux-guardian --update-cve-db
 
 # See database stats (works without root)
 linux-guardian --cve-db-stats
@@ -203,7 +206,7 @@ linux-guardian --no-cve-db
 
 ```bash
 # Update malware hash database (do this weekly, needs root for system-wide cache)
-sudo linux-guardian --update-malware-db
+linux-guardian --update-malware-db
 
 # See database stats (works without root)
 linux-guardian --malware-db-stats
