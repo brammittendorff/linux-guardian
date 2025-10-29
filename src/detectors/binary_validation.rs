@@ -28,22 +28,33 @@ const CRITICAL_BINARIES: &[&str] = &[
 ];
 
 /// Suspicious strings in binaries (backdoor indicators)
-/// NOTE: /dev/tcp/ is LEGITIMATE bash feature - excluded!
+/// NOTE: /dev/tcp/ is LEGITIMATE bash feature when used alone
+/// We check for specific reverse shell patterns
 const SUSPICIOUS_STRINGS: &[&str] = &[
     "eval(base64_decode",
-    "nc -e /bin/sh",
-    "nc -e /bin/bash",
-    "bash -i >& /dev/tcp", // Reverse shell (specific pattern)
-    "sh -i >& /dev/tcp",
-    "0.0.0.0:4444",    // Common reverse shell port
-    "PAYLOAD_START",   // Metasploit marker
-    "msfvenom",        // Metasploit payload generator
-    "chmod 777 /tmp",  // Suspicious permission change
-    "iptables -F && ", // Flush firewall in script
-    "setenforce 0 &&", // Disable SELinux in script
-    "rm -rf /var/log", // Log deletion
-    "ROOTKIT_",        // Rootkit marker
-    "BACKDOOR_",       // Backdoor marker
+    "nc -e /bin/sh",              // Netcat executing shell
+    "nc -e /bin/bash",            // Netcat executing bash
+    "nc -c /bin/sh",              // Netcat with command
+    "nc -c /bin/bash",            // Netcat with command
+    "ncat -e /bin/",              // Ncat variant
+    "netcat -e /bin/",            // Netcat variant
+    "bash -i >& /dev/tcp",        // Bash reverse shell (specific pattern)
+    "sh -i >& /dev/tcp",          // Shell reverse shell
+    "exec 5<>/dev/tcp/",          // File descriptor redirection to TCP
+    "0<&196;exec 196<>/dev/tcp/", // Advanced reverse shell
+    "0.0.0.0:4444",               // Common reverse shell port
+    ":4444/shell",                // Shell endpoint
+    "PAYLOAD_START",              // Metasploit marker
+    "msfvenom",                   // Metasploit payload generator
+    "chmod 777 /tmp",             // Suspicious permission change
+    "iptables -F && ",            // Flush firewall in script
+    "setenforce 0 &&",            // Disable SELinux in script
+    "rm -rf /var/log",            // Log deletion
+    "history -c",                 // Clear command history
+    "ROOTKIT_",                   // Rootkit marker
+    "BACKDOOR_",                  // Backdoor marker
+    "xmrig",                      // Cryptominer
+    "stratum+tcp://",             // Mining pool connection
 ];
 
 /// Scan critical binaries for legitimacy

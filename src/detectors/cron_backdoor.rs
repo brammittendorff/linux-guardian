@@ -1,5 +1,6 @@
 use crate::models::Finding;
 use anyhow::Result;
+use regex::Regex;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -134,16 +135,18 @@ fn check_cron_content(content: &str, source: &str, findings: &mut Vec<Finding>) 
         return;
     }
 
+    // Regex patterns for precise detection of netcat with IP:port
+    let nc_with_ip_port =
+        Regex::new(r"n(?:c|cat|etcat)\s+(?:-[elc]\s+)?(?:\d{1,3}\.){3}\d{1,3}\s+\d{1,5}").unwrap();
+    let nc_with_exec = Regex::new(r"n(?:c|cat|etcat)\s+-[ec]\s+/bin/(?:ba)?sh").unwrap();
+    let nc_listen = Regex::new(r"n(?:c|cat|etcat)\s+-l").unwrap();
+    let dev_tcp_pattern = Regex::new(r"/dev/tcp/(?:\d{1,3}\.){3}\d{1,3}/\d{1,5}").unwrap();
+    let reverse_shell = Regex::new(r"(?:ba)?sh\s+-i\s+[>&<]+\s*/dev/tcp/").unwrap();
+
     // Suspicious command patterns in cron jobs
     let backdoor_patterns = [
         ("curl", "Downloading external content"),
         ("wget", "Downloading external content"),
-        ("nc ", "Netcat - reverse shell"),
-        ("netcat", "Netcat - reverse shell"),
-        ("/dev/tcp/", "TCP socket redirection"),
-        ("/dev/udp/", "UDP socket redirection"),
-        ("bash -i", "Interactive bash shell"),
-        ("sh -i", "Interactive shell"),
         ("python -c", "Inline Python code"),
         ("perl -e", "Inline Perl code"),
         ("ruby -e", "Inline Ruby code"),
@@ -164,6 +167,108 @@ fn check_cron_content(content: &str, source: &str, findings: &mut Vec<Finding>) 
 
         let line_lower = line.to_lowercase();
 
+        // Check regex patterns first (more precise) - these are ALWAYS suspicious
+        if let Some(caps) = nc_with_ip_port.find(&line_lower) {
+            findings.push(
+                Finding::critical(
+                    "cron_backdoor",
+                    "Netcat with IP:Port in Cron Job",
+                    &format!(
+                        "Cron job in {} contains netcat connecting to IP:port: {}. Match: '{}'",
+                        source,
+                        line.trim(),
+                        caps.as_str()
+                    ),
+                )
+                .with_remediation(&format!(
+                    "URGENT: Remove backdoor: sudo crontab -e or edit {}",
+                    source
+                )),
+            );
+            continue;
+        }
+
+        if let Some(caps) = nc_with_exec.find(&line_lower) {
+            findings.push(
+                Finding::critical(
+                    "cron_backdoor",
+                    "Netcat Executing Shell in Cron Job",
+                    &format!(
+                        "Cron job in {} contains netcat executing shell: {}. Match: '{}'",
+                        source,
+                        line.trim(),
+                        caps.as_str()
+                    ),
+                )
+                .with_remediation(&format!(
+                    "URGENT: Remove backdoor: sudo crontab -e or edit {}",
+                    source
+                )),
+            );
+            continue;
+        }
+
+        if let Some(caps) = nc_listen.find(&line_lower) {
+            findings.push(
+                Finding::critical(
+                    "cron_backdoor",
+                    "Netcat Listening in Cron Job",
+                    &format!(
+                        "Cron job in {} contains netcat in listen mode: {}. Match: '{}'",
+                        source,
+                        line.trim(),
+                        caps.as_str()
+                    ),
+                )
+                .with_remediation(&format!(
+                    "URGENT: Remove backdoor: sudo crontab -e or edit {}",
+                    source
+                )),
+            );
+            continue;
+        }
+
+        if let Some(caps) = dev_tcp_pattern.find(&line_lower) {
+            findings.push(
+                Finding::critical(
+                    "cron_backdoor",
+                    "Reverse Shell Pattern in Cron Job",
+                    &format!(
+                        "Cron job in {} uses /dev/tcp/ to connect to IP:port: {}. Match: '{}'",
+                        source,
+                        line.trim(),
+                        caps.as_str()
+                    ),
+                )
+                .with_remediation(&format!(
+                    "URGENT: Remove reverse shell: sudo crontab -e or edit {}",
+                    source
+                )),
+            );
+            continue;
+        }
+
+        if let Some(caps) = reverse_shell.find(&line_lower) {
+            findings.push(
+                Finding::critical(
+                    "cron_backdoor",
+                    "Interactive Shell Reverse Connection in Cron",
+                    &format!(
+                        "Cron job in {} contains interactive shell redirected to TCP: {}. Match: '{}'",
+                        source,
+                        line.trim(),
+                        caps.as_str()
+                    ),
+                )
+                .with_remediation(&format!(
+                    "URGENT: Remove reverse shell: sudo crontab -e or edit {}",
+                    source
+                )),
+            );
+            continue;
+        }
+
+        // Check generic patterns (need legitimacy check)
         for (pattern, description) in &backdoor_patterns {
             if line_lower.contains(pattern) {
                 // Check if it's a legitimate command or backdoor
@@ -218,7 +323,10 @@ fn check_cron_content(content: &str, source: &str, findings: &mut Vec<Finding>) 
                     // Root cron jobs with network activity are high risk
                     if line_lower.contains("curl")
                         || line_lower.contains("wget")
-                        || line_lower.contains("nc ")
+                        || nc_with_ip_port.is_match(&line_lower)
+                        || nc_with_exec.is_match(&line_lower)
+                        || nc_listen.is_match(&line_lower)
+                        || dev_tcp_pattern.is_match(&line_lower)
                     {
                         findings.push(
                             Finding::high(

@@ -79,8 +79,12 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                     let suspicious_commands = [
                         "curl",
                         "wget",
-                        "nc ",
-                        "netcat",
+                        "nc -e",
+                        "nc -c",
+                        "nc -l",
+                        "ncat -e",
+                        "netcat -e",
+                        "/dev/tcp/",
                         "/tmp/",
                         "/dev/shm",
                         "bash -i",
@@ -279,7 +283,16 @@ pub async fn check_init_scripts() -> Result<Vec<Finding>> {
             if let Ok(content) = fs::read_to_string(init_path) {
                 let content_lower = content.to_lowercase();
 
-                let suspicious = ["curl", "wget", "/tmp", "bash -c", "nc ", "base64"];
+                let suspicious = [
+                    "curl",
+                    "wget",
+                    "/tmp",
+                    "bash -c",
+                    "nc -e",
+                    "nc -l",
+                    "/dev/tcp/",
+                    "base64",
+                ];
                 for pattern in &suspicious {
                     if content_lower.contains(pattern) {
                         findings.push(
