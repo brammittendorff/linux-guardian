@@ -15,8 +15,6 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # Vulnerability severity threshold
 # Options: none, low, medium, high, critical
 vulnerability = "deny"
-# Unmaintained crate warning
-unmaintained = "warn"
 # Crates with security notices
 notice = "warn"
 # Unsound crates
@@ -56,11 +54,11 @@ exceptions = [
     # Example: { allow = ["GPL-3.0"], name = "gpl-crate" },
 ]
 
-[[licenses.clarify]]
-# Clarify license for crates that have unclear licensing
-# Example: name = "ring"
-# Example: expression = "MIT AND ISC AND OpenSSL"
-# Example: license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+# Uncomment and configure if you need to clarify licenses for specific crates:
+# [[licenses.clarify]]
+# crate = "ring"
+# expression = "MIT AND ISC AND OpenSSL"
+# license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 multiple-versions = "warn"

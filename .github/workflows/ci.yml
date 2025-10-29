@@ -53,13 +53,67 @@ jobs:
         run: cargo test --lib --verbose
 
   build:
-    name: Build
-    runs-on: ${{ matrix.os }}
+    name: Build - ${{ matrix.name }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-20.04]
-        rust: [stable]
+        include:
+          # Native Ubuntu build
+          - name: Ubuntu Latest
+            rust: stable
+            container: ''
+            install_deps: ''
+          # Debian based distributions
+          - name: Debian Bookworm
+            rust: stable
+            container: debian:bookworm
+            install_deps: 'apt'
+          - name: Debian Bullseye
+            rust: stable
+            container: debian:bullseye
+            install_deps: 'apt'
+          # RPM based distributions
+          - name: Fedora Latest
+            rust: stable
+            container: fedora:latest
+            install_deps: 'dnf'
+          - name: Rocky Linux 9
+            rust: stable
+            container: rockylinux:9
+            install_deps: 'dnf'
+          # Alpine (musl-based, lightweight)
+          - name: Alpine Latest
+            rust: stable
+            container: alpine:latest
+            install_deps: 'apk'
+          # Arch based
+          - name: Arch Linux
+            rust: stable
+            container: archlinux:latest
+            install_deps: 'pacman'
+    container: ${{ matrix.container }}
     steps:
+      - name: Install dependencies (Debian/Ubuntu)
+        if: matrix.install_deps == 'apt'
+        run: |
+          apt-get update
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates
+
+      - name: Install dependencies (Fedora/Rocky)
+        if: matrix.install_deps == 'dnf'
+        run: |
+          dnf install -y curl gcc gcc-c++ make pkgconfig openssl-devel git ca-certificates
+
+      - name: Install dependencies (Alpine)
+        if: matrix.install_deps == 'apk'
+        run: |
+          apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev
+
+      - name: Install dependencies (Arch)
+        if: matrix.install_deps == 'pacman'
+        run: |
+          pacman -Syu --noconfirm curl base-devel openssl git ca-certificates
+
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
@@ -80,7 +134,7 @@ jobs:
           ./target/release/linux-guardian --version
 
       - name: Upload artifact
-        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        if: matrix.name == 'Ubuntu Latest'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-guardian-x86_64-linux
