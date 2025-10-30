@@ -83,6 +83,9 @@ pub fn init_database() -> Result<Connection> {
 
     let conn = Connection::open(&db_path)?;
 
+    // Enable foreign key constraints (disabled by default in SQLite)
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+
     // Create schema
     schema::create_tables(&conn)?;
 
