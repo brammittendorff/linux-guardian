@@ -58,8 +58,8 @@ walkdir = "2.5"
 pnet = { version = "0.35", optional = true }
 # Socket2 for better TCP/UDP control
 socket2 = { version = "0.5", features = ["all"] }
-# Trust-DNS for DNS analysis
-trust-dns-resolver = { version = "0.23", optional = true }
+# Hickory DNS (formerly trust-dns) for DNS analysis
+hickory-resolver = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tempfile = "3.13"
