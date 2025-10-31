@@ -33,7 +33,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             version_end_including TEXT,
             version_end_excluding TEXT,
             vulnerable INTEGER DEFAULT 1,
-            FOREIGN KEY(cve_id) REFERENCES cves(cve_id)
+            FOREIGN KEY(cve_id) REFERENCES cves(cve_id) ON DELETE CASCADE
         )",
         [],
     )?;
@@ -45,7 +45,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             cve_id TEXT NOT NULL,
             url TEXT,
             source TEXT,
-            FOREIGN KEY(cve_id) REFERENCES cves(cve_id)
+            FOREIGN KEY(cve_id) REFERENCES cves(cve_id) ON DELETE CASCADE
         )",
         [],
     )?;
