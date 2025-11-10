@@ -57,7 +57,7 @@ walkdir = "2.5"
 # Network analysis (optional, can be enabled for advanced features)
 pnet = { version = "0.35", optional = true }
 # Socket2 for better TCP/UDP control
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 # Hickory DNS (formerly trust-dns) for DNS analysis
 hickory-resolver = { version = "0.24", optional = true }
 
