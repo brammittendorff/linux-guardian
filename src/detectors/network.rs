@@ -1040,11 +1040,10 @@ fn grab_banner(port: u16) -> Option<String> {
                                 // Extract Server and other identifying headers
                                 for line in response.lines() {
                                     let line_lower = line.to_lowercase();
-                                    if line_lower.starts_with("server:") {
-                                        headers.push(line.trim().to_string());
-                                    } else if line_lower.starts_with("x-powered-by:") {
-                                        headers.push(line.trim().to_string());
-                                    } else if line_lower.starts_with("x-application:") {
+                                    if line_lower.starts_with("server:")
+                                        || line_lower.starts_with("x-powered-by:")
+                                        || line_lower.starts_with("x-application:")
+                                    {
                                         headers.push(line.trim().to_string());
                                     }
                                 }
