@@ -84,6 +84,30 @@ struct Args {
     /// Show detailed privilege requirements for all detectors
     #[arg(long)]
     show_privilege_info: bool,
+
+    /// Treat system as a mail server (suppress mail-related warnings)
+    #[arg(long)]
+    mail_server: bool,
+
+    /// Treat system as a web server (suppress web-related warnings)
+    #[arg(long)]
+    web_server: bool,
+
+    /// Treat system as a database server
+    #[arg(long)]
+    database_server: bool,
+
+    /// Auto-detect server type (enabled by default)
+    #[arg(long, default_value = "true")]
+    auto_detect: bool,
+
+    /// Path to suppression config file
+    #[arg(long)]
+    config: Option<String>,
+
+    /// Generate example suppression config file
+    #[arg(long)]
+    generate_config: bool,
 }
 
 #[tokio::main]
@@ -103,6 +127,15 @@ async fn main() -> Result<()> {
         .with_max_level(log_level)
         .with_target(false)
         .init();
+
+    // Handle config generation
+    if args.generate_config {
+        println!(
+            "{}",
+            linux_guardian::server_context::SuppressionConfig::example_toml()
+        );
+        return Ok(());
+    }
 
     // Handle privilege info display
     if args.show_privilege_info {
@@ -170,11 +203,60 @@ async fn main() -> Result<()> {
         print_privilege_warning(&args.mode);
     }
 
+    // Build server context
+    let mut server_context = if args.auto_detect {
+        linux_guardian::server_context::ServerContext::detect()
+    } else {
+        linux_guardian::server_context::ServerContext::default()
+    };
+
+    // Override with manual flags
+    if args.mail_server {
+        server_context.is_mail_server = true;
+    }
+    if args.web_server {
+        server_context.is_web_server = true;
+    }
+    if args.database_server {
+        server_context.is_database_server = true;
+    }
+
+    // Load suppression config
+    let mut suppression_config = if let Some(ref config_path) = args.config {
+        linux_guardian::server_context::SuppressionConfig::load(std::path::Path::new(config_path))
+            .unwrap_or_else(|e| {
+                eprintln!("⚠️  Failed to load config from {}: {}", config_path, e);
+                linux_guardian::server_context::SuppressionConfig::default()
+            })
+    } else {
+        linux_guardian::server_context::SuppressionConfig::load_default()
+    };
+
+    // Merge server context with suppressions
+    suppression_config.merge_with_context(&server_context);
+
+    // Show detected context if not quiet
+    if !args.quiet
+        && args.output == OutputStyle::Terminal
+        && !server_context.detected_services.is_empty()
+    {
+        println!(
+            "🔍 Detected server type: {}",
+            server_context.detected_services.join(", ")
+        );
+        println!(
+            "   {} ports and {} services whitelisted",
+            suppression_config.ignore_ports.len(),
+            suppression_config.allow_root_services.len()
+        );
+        println!();
+    }
+
     info!("Starting security scan in {:?} mode", args.mode);
     let start = Instant::now();
 
     // Run the scan
-    let findings = run_scan(&args, is_root).await?;
+    let findings = run_scan(&args, is_root, &server_context, &suppression_config).await?;
 
     let duration = start.elapsed();
 
@@ -235,7 +317,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::models::Finding>> {
+async fn run_scan(
+    args: &Args,
+    is_root: bool,
+    server_context: &linux_guardian::server_context::ServerContext,
+    suppression_config: &linux_guardian::server_context::SuppressionConfig,
+) -> Result<Vec<linux_guardian::models::Finding>> {
     use detectors::{
         binary_validation, bootloader, container_security, credential_theft, cryptominer,
         cve_database, cve_database_sqlite, cve_knowledge_base, disk_encryption, file_permissions,
@@ -367,6 +454,10 @@ async fn run_scan(args: &Args, is_root: bool) -> Result<Vec<linux_guardian::mode
             }
         }
     }
+
+    // Apply suppressions and adjust severities
+    findings = apply_suppressions(findings, server_context, suppression_config);
+    findings = adjust_finding_severities(findings, server_context, suppression_config);
 
     Ok(findings)
 }
@@ -559,4 +650,121 @@ fn print_privilege_info_table() {
         "sudo linux-guardian --mode comprehensive".bright_cyan()
     );
     println!();
+}
+
+/// Apply context-aware suppressions to findings
+fn apply_suppressions(
+    findings: Vec<linux_guardian::models::Finding>,
+    _server_context: &linux_guardian::server_context::ServerContext,
+    suppression_config: &linux_guardian::server_context::SuppressionConfig,
+) -> Vec<linux_guardian::models::Finding> {
+    findings
+        .into_iter()
+        .filter(|finding| {
+            // Suppress CVEs in ignore list
+            if let Some(ref cve) = finding.cve {
+                if suppression_config.ignore_cves.contains(cve) {
+                    return false;
+                }
+            }
+
+            // Suppress network exposure for expected ports
+            if finding.category == "network_exposure" {
+                // Extract port from description (e.g., "Port 25 is listening...")
+                if let Some(port_str) = finding.description.split_whitespace().nth(1) {
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        if suppression_config.ignore_ports.contains(&port) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            // Suppress root services that are expected
+            if finding.category == "systemd_root_service" {
+                for service_name in &suppression_config.allow_root_services {
+                    if finding.description.contains(service_name) {
+                        return false;
+                    }
+                }
+            }
+
+            // Suppress PHP-FPM JIT memory if web server
+            if finding.category == "memory_injection" {
+                for process_name in &suppression_config.allow_rwx_processes {
+                    if finding.description.contains(process_name) {
+                        return false;
+                    }
+                }
+            }
+
+            // Suppress debug module parameters if whitelisted
+            if finding.category == "suspicious_module_param" {
+                for module_name in &suppression_config.allow_debug_modules {
+                    if finding.description.contains(module_name) {
+                        return false;
+                    }
+                }
+            }
+
+            // Suppress DNS server warnings for trusted servers
+            if finding.category == "suspicious_network" && finding.title.contains("DNS Server") {
+                for dns_server in &suppression_config.trusted_dns_servers {
+                    if finding.description.contains(dns_server) {
+                        return false;
+                    }
+                }
+            }
+
+            // Suppress systemd backdoor warnings for known good services (clamav)
+            if finding.category == "systemd_backdoor"
+                && finding.description.contains("clamav-clamonacc")
+            {
+                // ClamAV on-access scanner legitimately uses bash -c
+                return false;
+            }
+
+            true
+        })
+        .collect()
+}
+
+/// Adjust finding severities based on context
+/// For example, disk encryption is CRITICAL for laptops but MEDIUM for datacenter servers
+fn adjust_finding_severities(
+    mut findings: Vec<linux_guardian::models::Finding>,
+    server_context: &linux_guardian::server_context::ServerContext,
+    _suppression_config: &linux_guardian::server_context::SuppressionConfig,
+) -> Vec<linux_guardian::models::Finding> {
+    for finding in &mut findings {
+        // Disk encryption less critical for servers (physical security assumed)
+        if finding.category == "encryption"
+            && finding.title.contains("Disk Encryption")
+            && (server_context.is_mail_server
+                || server_context.is_web_server
+                || server_context.is_database_server)
+            && finding.severity == "critical"
+        {
+            finding.severity = "medium".to_string();
+        }
+
+        // GRUB password less critical on servers in secure datacenters
+        if finding.category == "bootloader"
+            && finding.title.contains("Password")
+            && (server_context.is_mail_server || server_context.is_web_server)
+            && (finding.severity == "high" || finding.severity == "critical")
+        {
+            finding.severity = "medium".to_string();
+        }
+
+        // Connection count mismatch might be normal with IPv6, containers, etc.
+        if finding.category == "rootkit"
+            && finding.title.contains("Connection Count Mismatch")
+            && finding.severity == "high"
+        {
+            finding.severity = "medium".to_string();
+        }
+    }
+
+    findings
 }

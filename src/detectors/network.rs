@@ -745,7 +745,27 @@ fn fingerprint_services_batch(ports: &[u16]) -> HashMap<u16, String> {
                                     "mysqld" => "MySQL database",
                                     "postgres" => "PostgreSQL database",
                                     "redis-ser" | "redis" => "Redis server",
-                                    "docker-pr" => "Docker proxy",
+                                    "docker-pr" => {
+                                        // Docker proxy detected - try to identify actual service via banner
+                                        if let Some(banner) = grab_banner(port) {
+                                            let actual_service =
+                                                identify_service_from_banner(&banner, port);
+                                            // Only use banner if it's more specific than generic Docker proxy
+                                            if !actual_service.contains("Unknown")
+                                                && !actual_service.is_empty()
+                                            {
+                                                result.insert(
+                                                    port,
+                                                    format!(
+                                                        "{} (Docker container)",
+                                                        actual_service
+                                                    ),
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                        "Docker proxy"
+                                    }
                                     "bzfs" => "BZFlag game server",
                                     "python" | "python3" => "Python application",
                                     "node" => "Node.js application",
@@ -763,16 +783,162 @@ fn fingerprint_services_batch(ports: &[u16]) -> HashMap<u16, String> {
         }
     }
 
-    // For ports not found by lsof, try banner grabbing
+    // For ports not found by lsof, try banner grabbing or use port-based detection
     for &port in ports {
         if let std::collections::hash_map::Entry::Vacant(e) = result.entry(port) {
-            if let Some(banner) = grab_banner(port) {
-                e.insert(format!("Banner: {}", banner));
-            }
+            let banner = grab_banner(port).unwrap_or_default();
+            // Always identify service - will use port-based fallback if banner is empty
+            let identified_service = identify_service_from_banner(&banner, port);
+            e.insert(identified_service);
         }
     }
 
     result
+}
+
+/// Identify service from banner text
+fn identify_service_from_banner(banner: &str, port: u16) -> String {
+    let banner_lower = banner.to_lowercase();
+
+    // Check for specific service signatures in headers
+    if banner_lower.contains("server: minio") {
+        return "MinIO S3-compatible object storage".to_string();
+    }
+
+    if banner_lower.contains("mailhog") {
+        return "MailHog (email testing tool)".to_string();
+    }
+
+    if banner_lower.contains("220 ") && banner_lower.contains("smtp") {
+        if banner_lower.contains("mailhog") {
+            return "MailHog SMTP server (email testing)".to_string();
+        }
+        return format!("SMTP mail server - {}", banner.trim());
+    }
+
+    if banner_lower.contains("nginx") {
+        if let Some(version) = extract_version(&banner_lower, "nginx/") {
+            return format!("Nginx web server v{}", version);
+        }
+        return "Nginx web server".to_string();
+    }
+
+    if banner_lower.contains("apache") {
+        return "Apache web server".to_string();
+    }
+
+    if banner_lower.contains("postgresql") || banner_lower.contains("postgres") {
+        return "PostgreSQL database".to_string();
+    }
+
+    if banner_lower.contains("mysql") {
+        return "MySQL database".to_string();
+    }
+
+    if banner_lower.contains("redis") {
+        return "Redis server".to_string();
+    }
+
+    if banner_lower.contains("mongodb") {
+        return "MongoDB database".to_string();
+    }
+
+    if banner_lower.contains("ssh-") {
+        return "OpenSSH server".to_string();
+    }
+
+    // Check for Server header pattern
+    if banner_lower.contains("server:") {
+        for line in banner.lines() {
+            if line.to_lowercase().starts_with("server:") {
+                let server = line.split(':').nth(1).unwrap_or("").trim();
+                if !server.is_empty() {
+                    return format!("HTTP server: {}", server);
+                }
+            }
+        }
+    }
+
+    if banner_lower.contains("http/") {
+        return format!(
+            "HTTP server - {}",
+            banner.lines().next().unwrap_or(banner).trim()
+        );
+    }
+
+    // VNC protocol detection
+    if banner_lower.starts_with("rfb ") {
+        return format!("VNC server ({})", banner.trim());
+    }
+
+    // Selenium Grid detection
+    if banner_lower.contains("selenium") {
+        return "Selenium Grid (browser automation)".to_string();
+    }
+
+    // Check by port number if banner is unclear
+    match port {
+        80 | 8080 | 8000 => {
+            if !banner.is_empty() && banner.len() < 100 {
+                format!("HTTP service - {}", banner.trim())
+            } else {
+                "HTTP web server".to_string()
+            }
+        }
+        443 | 8443 => "HTTPS service".to_string(),
+        5432 => {
+            // PostgreSQL - check if banner contains postgres or just use port knowledge
+            if banner_lower.contains("postgres") || banner_lower.contains("postgresql") {
+                "PostgreSQL database".to_string()
+            } else if !banner.is_empty() && banner.len() < 50 {
+                format!("PostgreSQL database - {}", banner.trim())
+            } else {
+                "PostgreSQL database (port 5432)".to_string()
+            }
+        }
+        3306 => "MySQL database".to_string(),
+        6379 => "Redis server".to_string(),
+        27017 => "MongoDB".to_string(),
+        5900..=5999 => format!("VNC server - {}", banner.trim()),
+        1025 => "SMTP server (likely MailHog)".to_string(),
+        8025 => "MailHog HTTP API (email testing)".to_string(),
+        9000 => "MinIO API (S3-compatible storage)".to_string(),
+        9001 => "MinIO Console (web UI)".to_string(),
+        4442 | 4443 => "Selenium Grid Node (browser automation)".to_string(),
+        4444 => {
+            // Selenium Hub typically on 4444
+            if banner_lower.contains("selenium") || banner_lower.contains("grid") {
+                "Selenium Grid Hub (browser automation)".to_string()
+            } else if !banner.is_empty() && banner.len() < 100 {
+                format!("Selenium Grid Hub - {}", banner.trim())
+            } else {
+                "Selenium Grid Hub (port 4444)".to_string()
+            }
+        }
+        _ => {
+            // Return banner with "Unknown service" prefix for truly unknown services
+            if banner.is_empty() || banner.chars().all(|c| !c.is_ascii_alphanumeric()) {
+                "Unknown service".to_string()
+            } else {
+                format!("Unknown: {}", banner.trim())
+            }
+        }
+    }
+}
+
+/// Extract version number from banner text
+fn extract_version(text: &str, prefix: &str) -> Option<String> {
+    if let Some(start) = text.find(prefix) {
+        let after_prefix = &text[start + prefix.len()..];
+        let version: String = after_prefix
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if !version.is_empty() {
+            return Some(version);
+        }
+    }
+    None
 }
 
 /// Fingerprint a service on a port by checking process and banner grabbing
@@ -821,7 +987,7 @@ fn fingerprint_service(port: u16) -> Option<String> {
 
     // Fallback: Try banner grabbing for common protocols
     if let Some(banner) = grab_banner(port) {
-        return Some(format!("Banner: {}", banner));
+        return Some(identify_service_from_banner(&banner, port));
     }
 
     None
@@ -855,19 +1021,35 @@ fn grab_banner(port: u16) -> Option<String> {
                     _ => {}
                 }
 
-                // Try sending HTTP request for web servers
-                if port == 80 || port == 8080 || port == 8443 {
+                // Try sending HTTP request - many services respond to HTTP
+                // Try this for common HTTP ports and any high-numbered ports
+                if port == 80 || port == 443 || port >= 8000 {
                     use std::io::Write;
-                    stream.write_all(b"GET / HTTP/1.0\r\n\r\n").ok()?;
+                    // Send HTTP HEAD request (lighter than GET)
+                    stream
+                        .write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                        .ok()?;
+                    stream.flush().ok()?;
+
                     if let Ok(n) = stream.read(&mut buffer) {
                         if n > 0 {
-                            let response = String::from_utf8_lossy(&buffer[..n.min(200)]);
+                            let response = String::from_utf8_lossy(&buffer[..n.min(1024)]);
                             if response.contains("HTTP/") {
-                                // Extract Server header
+                                let mut headers = Vec::new();
+
+                                // Extract Server and other identifying headers
                                 for line in response.lines() {
-                                    if line.to_lowercase().starts_with("server:") {
-                                        return Some(line.trim().to_string());
+                                    let line_lower = line.to_lowercase();
+                                    if line_lower.starts_with("server:")
+                                        || line_lower.starts_with("x-powered-by:")
+                                        || line_lower.starts_with("x-application:")
+                                    {
+                                        headers.push(line.trim().to_string());
                                     }
+                                }
+
+                                if !headers.is_empty() {
+                                    return Some(headers.join("; "));
                                 }
                                 return Some("HTTP server".to_string());
                             }
