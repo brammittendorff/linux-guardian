@@ -1,0 +1,488 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build release for'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-packages:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Debian/Ubuntu packages (.deb)
+          - name: Debian 12 (Bookworm) amd64
+            distro: debian
+            version: bookworm
+            arch: amd64
+            package_type: deb
+            container: debian:bookworm
+
+          - name: Debian 11 (Bullseye) amd64
+            distro: debian
+            version: bullseye
+            arch: amd64
+            package_type: deb
+            container: debian:bullseye
+
+          - name: Ubuntu 24.04 (Noble) amd64
+            distro: ubuntu
+            version: noble
+            arch: amd64
+            package_type: deb
+            container: ubuntu:noble
+
+          - name: Ubuntu 22.04 (Jammy) amd64
+            distro: ubuntu
+            version: jammy
+            arch: amd64
+            package_type: deb
+            container: ubuntu:jammy
+
+          # RPM packages (Fedora/RHEL/Rocky)
+          - name: Fedora 40 x86_64
+            distro: fedora
+            version: "40"
+            arch: x86_64
+            package_type: rpm
+            container: fedora:40
+
+          - name: Fedora 39 x86_64
+            distro: fedora
+            version: "39"
+            arch: x86_64
+            package_type: rpm
+            container: fedora:39
+
+          - name: Rocky Linux 9 x86_64
+            distro: rockylinux
+            version: "9"
+            arch: x86_64
+            package_type: rpm
+            container: rockylinux:9
+
+          # Arch Linux packages
+          - name: Arch Linux x86_64
+            distro: arch
+            version: latest
+            arch: x86_64
+            package_type: pkg.tar.zst
+            container: archlinux:latest
+
+          # Alpine Linux (musl-based)
+          - name: Alpine Linux 3.19 x86_64
+            distro: alpine
+            version: "3.19"
+            arch: x86_64
+            package_type: apk
+            container: alpine:3.19
+
+    container: ${{ matrix.container }}
+
+    steps:
+      - name: Install dependencies (Debian/Ubuntu)
+        if: matrix.package_type == 'deb'
+        run: |
+          apt-get update
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper
+
+      - name: Install dependencies (Fedora/Rocky)
+        if: matrix.package_type == 'rpm'
+        run: |
+          if command -v dnf &> /dev/null; then
+            dnf install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
+          else
+            yum install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
+          fi
+
+      - name: Install dependencies (Arch)
+        if: matrix.package_type == 'pkg.tar.zst'
+        run: |
+          pacman -Syu --noconfirm curl base-devel openssl git ca-certificates bash binutils fakeroot
+
+      - name: Install dependencies (Alpine)
+        if: matrix.package_type == 'apk'
+        run: |
+          apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Package signing: We DON'T sign in CI/CD for security reasons
+      # Instead we rely on:
+      # 1. SHA256/SHA512 checksums (generated below)
+      # 2. GitHub's attestation/provenance (automatic)
+      # 3. For GPG signing: Sign packages locally on your machine before release
+      - name: Set signing flag
+        shell: bash
+        run: |
+          echo "GPG_AVAILABLE=false" >> $GITHUB_ENV
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          cargo build --release --verbose
+          strip target/release/linux-guardian || true
+
+      - name: Build DEB package
+        if: matrix.package_type == 'deb'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          PKG_NAME="linux-guardian_${VERSION}_${ARCH}"
+
+          # Create package structure
+          mkdir -p "$PKG_NAME/DEBIAN"
+          mkdir -p "$PKG_NAME/usr/local/bin"
+          mkdir -p "$PKG_NAME/usr/share/doc/linux-guardian"
+          mkdir -p "$PKG_NAME/var/cache/linux-guardian"
+
+          # Copy binary
+          cp target/release/linux-guardian "$PKG_NAME/usr/local/bin/"
+          chmod 755 "$PKG_NAME/usr/local/bin/linux-guardian"
+
+          # Copy documentation
+          cp README.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
+          cp CONTRIBUTING.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
+
+          # Create control file
+          cat > "$PKG_NAME/DEBIAN/control" <<EOF
+          Package: linux-guardian
+          Version: ${VERSION}
+          Section: admin
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: Linux Guardian Contributors <noreply@github.com>
+          Description: Lightning-fast Linux security scanner
+           Detects active threats on your Linux system in 10-30 seconds.
+           Built in Rust with 30+ specialized detectors for malware, CVEs,
+           rootkits, and network attacks.
+          Homepage: https://github.com/brammittendorff/linux-guardian
+          EOF
+
+          # Build package
+          dpkg-deb --build "$PKG_NAME"
+          DEB_FILE="linux-guardian_${VERSION}_${{ matrix.distro }}_${ARCH}.deb"
+          mv "${PKG_NAME}.deb" "$DEB_FILE"
+
+          # Sign package if GPG key is available
+          if [ "$GPG_AVAILABLE" = "true" ]; then
+            dpkg-sig --sign builder "$DEB_FILE"
+            echo "✓ Package signed with GPG"
+          fi
+
+      - name: Build RPM package
+        if: matrix.package_type == 'rpm'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Setup RPM build environment
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          # Create spec file
+          cat > ~/rpmbuild/SPECS/linux-guardian.spec <<EOF
+          Name:           linux-guardian
+          Version:        ${VERSION}
+          Release:        1%{?dist}
+          Summary:        Lightning-fast Linux security scanner
+          License:        MIT OR Apache-2.0
+          URL:            https://github.com/brammittendorff/linux-guardian
+          BuildArch:      ${{ matrix.arch }}
+
+          %description
+          Detects active threats on your Linux system in 10-30 seconds.
+          Built in Rust with 30+ specialized detectors for malware, CVEs,
+          rootkits, and network attacks.
+
+          %install
+          mkdir -p %{buildroot}/usr/local/bin
+          mkdir -p %{buildroot}/var/cache/linux-guardian
+          cp ${GITHUB_WORKSPACE}/target/release/linux-guardian %{buildroot}/usr/local/bin/
+          chmod 755 %{buildroot}/usr/local/bin/linux-guardian
+
+          %files
+          /usr/local/bin/linux-guardian
+          %dir /var/cache/linux-guardian
+
+          %changelog
+          * $(date "+%a %b %d %Y") GitHub Actions <noreply@github.com> - ${VERSION}-1
+          - Automated build for ${{ matrix.name }}
+          EOF
+
+          # Setup GPG for RPM signing if available
+          if [ "$GPG_AVAILABLE" = "true" ]; then
+            GPG_NAME=$(gpg --list-keys --with-colons | grep '^uid' | head -1 | cut -d: -f10)
+            cat > ~/.rpmmacros <<MACROS
+          %_signature gpg
+          %_gpg_name ${GPG_NAME}
+          MACROS
+            echo "✓ GPG configured for RPM signing"
+          fi
+
+          # Build RPM
+          if [ "$GPG_AVAILABLE" = "true" ]; then
+            rpmbuild -bb --sign ~/rpmbuild/SPECS/linux-guardian.spec
+          else
+            rpmbuild -bb ~/rpmbuild/SPECS/linux-guardian.spec
+          fi
+
+          # Find and rename the RPM
+          RPM_FILE="linux-guardian-${VERSION}-1.${{ matrix.distro }}${{ matrix.version }}.${{ matrix.arch }}.rpm"
+          find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} "$RPM_FILE" \;
+
+          if [ "$GPG_AVAILABLE" = "true" ]; then
+            echo "✓ RPM package signed with GPG"
+          fi
+
+      - name: Build Arch package
+        if: matrix.package_type == 'pkg.tar.zst'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Create PKGBUILD
+          mkdir -p archpkg
+          cat > archpkg/PKGBUILD <<EOF
+          # Maintainer: Linux Guardian Contributors <noreply@github.com>
+          pkgname=linux-guardian
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="Lightning-fast Linux security scanner"
+          arch=('x86_64')
+          url="https://github.com/brammittendorff/linux-guardian"
+          license=('MIT' 'Apache')
+          depends=()
+
+          package() {
+              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\${pkgdir}/usr/local/bin/linux-guardian"
+              install -dm755 "\${pkgdir}/var/cache/linux-guardian"
+          }
+          EOF
+
+          cd archpkg
+          # Build without running as non-root user (CI environment)
+          makepkg --skipinteg --skippgpcheck
+          mv *.pkg.tar.zst "../linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst"
+
+      - name: Build Alpine APK package
+        if: matrix.package_type == 'apk'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Setup abuild
+          mkdir -p ~/packages/main/x86_64
+          mkdir -p ~/apkbuild
+
+          # Create APKBUILD
+          cat > ~/apkbuild/APKBUILD <<EOF
+          # Maintainer: Linux Guardian Contributors <noreply@github.com>
+          pkgname=linux-guardian
+          pkgver=${VERSION}
+          pkgrel=0
+          pkgdesc="Lightning-fast Linux security scanner"
+          url="https://github.com/brammittendorff/linux-guardian"
+          arch="x86_64"
+          license="MIT OR Apache-2.0"
+          options="!check"
+
+          package() {
+              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\$pkgdir/usr/local/bin/linux-guardian"
+              install -dm755 "\$pkgdir/var/cache/linux-guardian"
+          }
+          EOF
+
+          cd ~/apkbuild
+          abuild-keygen -a -i -n || true
+          abuild -F
+          find ~/packages -name "*.apk" -exec cp {} "${GITHUB_WORKSPACE}/linux-guardian-${VERSION}-r0.${{ matrix.arch }}.apk" \;
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.distro }}-${{ matrix.version }}-${{ matrix.arch }}
+          path: |
+            *.deb
+            *.rpm
+            *.pkg.tar.zst
+            *.apk
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          sha256sum *.deb *.rpm *.pkg.tar.zst *.apk 2>/dev/null > SHA256SUMS || true
+          sha512sum *.deb *.rpm *.pkg.tar.zst *.apk 2>/dev/null > SHA512SUMS || true
+
+      - name: Generate build provenance (attestation)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            *.deb
+            *.rpm
+            *.pkg.tar.zst
+            *.apk
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *.deb
+            *.rpm
+            *.pkg.tar.zst
+            *.apk
+            SHA256SUMS
+            SHA512SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-repositories:
+    name: Publish Package Repositories
+    needs: build-packages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          path: packages
+
+      - name: Setup repository structure
+        run: |
+          mkdir -p repo/{deb,rpm,arch,alpine}
+          find packages -name "*.deb" -exec cp {} repo/deb/ \;
+          find packages -name "*.rpm" -exec cp {} repo/rpm/ \;
+          find packages -name "*.pkg.tar.zst" -exec cp {} repo/arch/ \;
+          find packages -name "*.apk" -exec cp {} repo/alpine/ \;
+
+      - name: Generate DEB repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+          cd repo/deb
+          dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
+
+      - name: Generate RPM repository
+        run: |
+          sudo apt-get install -y createrepo-c
+          cd repo/rpm
+          createrepo_c .
+
+      - name: Generate Arch repository
+        run: |
+          cd repo/arch
+          # Create repo database
+          for pkg in *.pkg.tar.zst; do
+            echo "Adding $pkg to repository"
+          done
+          repo-add linux-guardian.db.tar.gz *.pkg.tar.zst || echo "Note: repo-add not available in Ubuntu, packages available as direct downloads"
+
+      - name: Generate Alpine repository index
+        run: |
+          cd repo/alpine
+          # Alpine index generation would require apk tools
+          echo "Alpine packages available as direct downloads"
+
+      - name: Create installation instructions
+        run: |
+          cat > repo/README.md <<'EOF'
+          # Linux Guardian Package Repository
+
+          ## Debian/Ubuntu
+
+          ```bash
+          # Add repository
+          echo "deb [trusted=yes] https://brammittendorff.github.io/linux-guardian/repo/deb ./" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+
+          # Update and install
+          sudo apt update
+          sudo apt install linux-guardian
+          ```
+
+          ## Fedora/RHEL/Rocky Linux
+
+          ```bash
+          # Add repository
+          sudo tee /etc/yum.repos.d/linux-guardian.repo <<'REPO'
+          [linux-guardian]
+          name=Linux Guardian Repository
+          baseurl=https://brammittendorff.github.io/linux-guardian/repo/rpm
+          enabled=1
+          gpgcheck=0
+          REPO
+
+          # Install
+          sudo dnf install linux-guardian
+          ```
+
+          ## Arch Linux
+
+          ```bash
+          # Download and install directly
+          wget https://brammittendorff.github.io/linux-guardian/repo/arch/linux-guardian-*.pkg.tar.zst
+          sudo pacman -U linux-guardian-*.pkg.tar.zst
+          ```
+
+          ## Alpine Linux
+
+          ```bash
+          # Download and install directly
+          wget https://brammittendorff.github.io/linux-guardian/repo/alpine/linux-guardian-*.apk
+          sudo apk add --allow-untrusted linux-guardian-*.apk
+          ```
+
+          ## Direct Downloads
+
+          All packages are also available as release assets: https://github.com/brammittendorff/linux-guardian/releases/latest
+          EOF
+
+      - name: Commit and push repository
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add repo/
+          git commit -m "Update package repositories for ${{ github.event.release.tag_name }}" || true
+          git push

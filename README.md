@@ -1,12 +1,12 @@
-# 🛡️ Linux Guardian
+# Linux Guardian
 
 **A lightning-fast Linux security scanner that finds REAL threats with minimal false positives**
 
 Detects active threats on your Linux system in 10-30 seconds. Built in Rust with 30+ specialized detectors for malware, CVEs, rootkits, and network attacks.
 
-> 💡 **Works without root!** Most security checks run perfectly fine without root privileges.
+> **Works without root!** Most security checks run perfectly fine without root privileges.
 
-## 🎯 What It Finds
+## What It Finds
 
 - **Active Threats**: Cryptominers, known malware (4M+ hashes), rootkits, reverse shells, C2 beaconing
 - **Exploitable CVEs**: 1,400+ actively exploited vulnerabilities from CISA catalog
@@ -14,7 +14,7 @@ Detects active threats on your Linux system in 10-30 seconds. Built in Rust with
 - **Privilege Escalation**: Suspicious SUID binaries, dangerous capabilities, backdoors
 - **System Weaknesses**: Firewall disabled, weak configs, missing updates
 
-## ⚡ Quick Start
+## Quick Start
 
 ```bash
 # Clone and install (handles Rust installation, builds, installs to /usr/local/bin)
@@ -23,11 +23,11 @@ cd linux-guardian
 ./install.sh
 
 # Run a scan (works without root!)
-linux-guardian              # Fast scan (10-30s)
-sudo linux-guardian         # Complete scan with all checks
+linux-guardian                   # Fast scan (10-30s)
+sudo linux-guardian --mode deep  # Complete scan with all checks
 ```
 
-## 📊 Why Use This?
+## Why Use This?
 
 | Linux Guardian | Traditional Scanners |
 |----------------|---------------------|
@@ -37,7 +37,7 @@ sudo linux-guardian         # Complete scan with all checks
 | 100% local | Often cloud-based |
 | 1,400+ actively exploited CVEs | Generic CVE lists |
 
-## 🔍 Usage Examples
+## Usage Examples
 
 ```bash
 # Quick scan (no root needed)
@@ -65,7 +65,7 @@ linux-guardian --output json
 linux-guardian --output summary
 ```
 
-## 🔬 Detection Capabilities
+## Detection Capabilities
 
 **30+ specialized detectors** across:
 - Malware & Threats (cryptominers, known hashes, rootkits, reverse shells)
@@ -76,7 +76,7 @@ linux-guardian --output summary
 - Persistence Mechanisms (systemd, cron, eBPF, kernel modules)
 - Credential Theft (SSH keys, cookies, API keys)
 
-## 📦 CVE & Malware Databases
+## CVE & Malware Databases
 
 ### CVE Database (1,400+ actively exploited)
 ```bash
@@ -90,7 +90,7 @@ linux-guardian --update-malware-db    # Update malware hashes
 linux-guardian --malware-db-stats     # Show database info
 ```
 
-## 🔧 Advanced Options
+## Advanced Options
 
 ```bash
 # Filter by severity
@@ -103,13 +103,13 @@ linux-guardian --output json --quiet > scan.json
 linux-guardian --show-privilege-info
 ```
 
-## 💡 Privilege Separation
+## Privilege Separation
 
 - **10 detectors** work fully without root (CVE checks, network analysis, kernel hardening)
 - **11 detectors** work partially without root (SSH config, firewall status, own processes)
 - **1 detector** requires root (SUID binary scanning)
 
-## 🛡️ How It Works
+## How It Works
 
 **Smart Detection:**
 - Generic package verification (dpkg/rpm, no hardcoded allowlists)
@@ -118,41 +118,41 @@ linux-guardian --show-privilege-info
 - Version-specific CVE matching (only flags actually vulnerable versions)
 - Network service fingerprinting (intelligent banner grabbing)
 
-## 🔍 Real-World Examples
+## Real-World Examples
 
 **Cryptominer detected:**
 ```
-🔴 CRITICAL Known Cryptominer Process Detected
+CRITICAL Known Cryptominer Process Detected
   Process "xmrig" (PID 12345) is a known cryptominer
-  💡 kill -9 12345 && investigate how it got there
+  Remediation: kill -9 12345 && investigate how it got there
 ```
 
 **Vulnerable sudo:**
 ```
-🔴 CRITICAL Vulnerable Sudo Version Detected
+CRITICAL Vulnerable Sudo Version Detected
   Sudo version 1.9.15 vulnerable to CVE-2025-32462
-  💡 apt update && apt upgrade sudo
+  Remediation: apt update && apt upgrade sudo
 ```
 
 **SSH brute force:**
 ```
-🟠 HIGH SSH Brute Force Attack Detected
+HIGH SSH Brute Force Attack Detected
   248 failed login attempts in last 24h
-  💡 Check /var/log/auth.log, consider fail2ban
+  Remediation: Check /var/log/auth.log, consider fail2ban
 ```
 
-## ⚡ Performance
+## Performance
 
 - Scan time: 10-30 seconds (fast mode)
 - CPU usage: <5% during scan
 - Memory: <100MB
 - Read-only operations (no system modifications)
 
-## 🔒 Security & Privacy
+## Security & Privacy
 
-✅ All scanning is local | ✅ No data sent to external servers | ✅ Open source | ✅ No telemetry
+All scanning is local | No data sent to external servers | Open source | No telemetry
 
-## 🐛 Known Limitations
+## Known Limitations
 
 - Kernel rootkits: Limited detection (needs eBPF/kernel modules)
 - Encrypted malware: Can't scan encrypted files
@@ -161,19 +161,19 @@ linux-guardian --show-privilege-info
 
 Use as **part** of your security, not the only tool.
 
-## 🤝 Contributing
+## Contributing
 
 PRs welcome! Especially for: New CVE checks, better cryptominer detection, container security, performance optimizations.
 
-## 📜 License
+## License
 
 MIT OR Apache-2.0
 
-## ⚠️ Legal
+## Legal
 
 **Defensive use only.** For systems you own or have permission to scan. Do not scan systems you don't own or use for offensive security without authorization.
 
-## 📚 Documentation
+## Documentation
 
 - [CVE Database Documentation](docs/CVE_DATABASE.md)
 - [Verification Guide](docs/VERIFICATION_GUIDE.md)
@@ -181,4 +181,4 @@ MIT OR Apache-2.0
 
 ---
 
-**Keep your system secure. 🛡️**
+**Keep your system secure.**
