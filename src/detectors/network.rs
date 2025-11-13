@@ -748,10 +748,19 @@ fn fingerprint_services_batch(ports: &[u16]) -> HashMap<u16, String> {
                                     "docker-pr" => {
                                         // Docker proxy detected - try to identify actual service via banner
                                         if let Some(banner) = grab_banner(port) {
-                                            let actual_service = identify_service_from_banner(&banner, port);
+                                            let actual_service =
+                                                identify_service_from_banner(&banner, port);
                                             // Only use banner if it's more specific than generic Docker proxy
-                                            if !actual_service.contains("Unknown") && !actual_service.is_empty() {
-                                                result.insert(port, format!("{} (Docker container)", actual_service));
+                                            if !actual_service.contains("Unknown")
+                                                && !actual_service.is_empty()
+                                            {
+                                                result.insert(
+                                                    port,
+                                                    format!(
+                                                        "{} (Docker container)",
+                                                        actual_service
+                                                    ),
+                                                );
                                                 continue;
                                             }
                                         }
@@ -851,7 +860,10 @@ fn identify_service_from_banner(banner: &str, port: u16) -> String {
     }
 
     if banner_lower.contains("http/") {
-        return format!("HTTP server - {}", banner.lines().next().unwrap_or(banner).trim());
+        return format!(
+            "HTTP server - {}",
+            banner.lines().next().unwrap_or(banner).trim()
+        );
     }
 
     // VNC protocol detection
@@ -1014,7 +1026,9 @@ fn grab_banner(port: u16) -> Option<String> {
                 if port == 80 || port == 443 || port >= 8000 {
                     use std::io::Write;
                     // Send HTTP HEAD request (lighter than GET)
-                    stream.write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n").ok()?;
+                    stream
+                        .write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                        .ok()?;
                     stream.flush().ok()?;
 
                     if let Ok(n) = stream.read(&mut buffer) {
