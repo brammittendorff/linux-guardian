@@ -280,6 +280,9 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
+          # Create a non-root user (makepkg refuses to run as root)
+          useradd -m builder
+
           # Create PKGBUILD
           mkdir -p archpkg
           cat > archpkg/PKGBUILD <<EOF
@@ -299,9 +302,12 @@ jobs:
           }
           EOF
 
+          # Give builder ownership of everything
+          chown -R builder:builder . archpkg
+
+          # Build as non-root user
           cd archpkg
-          # Build without running as non-root user (CI environment)
-          makepkg --skipinteg --skippgpcheck
+          su builder -c "makepkg --skipinteg --skippgpcheck"
           mv *.pkg.tar.zst "../linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst"
 
       - name: Build Alpine APK package
