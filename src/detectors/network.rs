@@ -503,9 +503,9 @@ async fn detect_hidden_connections() -> Result<Vec<Finding>> {
         }
 
         // Look for matching connection in ss output (ignoring state differences)
-        let found = ss_connections.iter().any(|ss_conn| {
-            connections_match(proc_conn, ss_conn)
-        });
+        let found = ss_connections
+            .iter()
+            .any(|ss_conn| connections_match(proc_conn, ss_conn));
 
         if !found {
             hidden_connections.push(proc_conn.clone());
@@ -518,7 +518,12 @@ async fn detect_hidden_connections() -> Result<Vec<Finding>> {
         let example_conns: Vec<String> = hidden_connections
             .iter()
             .take(3)
-            .map(|c| format!("{}:{} -> {}:{}", c.local_ip, c.local_port, c.remote_ip, c.remote_port))
+            .map(|c| {
+                format!(
+                    "{}:{} -> {}:{}",
+                    c.local_ip, c.local_port, c.remote_ip, c.remote_port
+                )
+            })
             .collect();
 
         findings.push(
@@ -696,7 +701,11 @@ fn is_likely_formatting_difference(conn: &Connection) -> bool {
 
     // TIME-WAIT and CLOSE-WAIT states can disappear quickly
     // State codes: 06=TIME_WAIT, 08=CLOSE_WAIT
-    if conn.state == "06" || conn.state == "08" || conn.state == "TIME-WAIT" || conn.state == "CLOSE-WAIT" {
+    if conn.state == "06"
+        || conn.state == "08"
+        || conn.state == "TIME-WAIT"
+        || conn.state == "CLOSE-WAIT"
+    {
         return true;
     }
 

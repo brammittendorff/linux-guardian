@@ -104,8 +104,11 @@ jobs:
         if: matrix.package_type == 'rpm'
         run: |
           if command -v dnf &> /dev/null; then
+            # Update base system first to fix glibc version mismatches
+            dnf upgrade -y --refresh || dnf upgrade -y
             dnf install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
           else
+            yum upgrade -y
             yum install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
           fi
 
