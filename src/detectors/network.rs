@@ -486,38 +486,230 @@ async fn analyze_udp_connections() -> Result<Vec<Finding>> {
 async fn detect_hidden_connections() -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
 
-    // Compare /proc/net output with netstat/ss output
-    // This is a simplified check - a real implementation would be more thorough
+    // Parse connections from /proc/net/tcp and /proc/net/tcp6
+    let proc_connections = parse_proc_connections();
 
-    // Count connections from /proc
-    let tcp_content = fs::read_to_string("/proc/net/tcp").unwrap_or_default();
-    let proc_tcp_count = tcp_content.lines().count() - 1; // Subtract header
+    // Parse connections from ss output
+    let ss_connections = parse_ss_connections();
 
-    // Try to use ss or netstat
-    let output = std::process::Command::new("ss").args(["-tan"]).output();
+    // Find connections that exist in /proc but NOT in ss output
+    // This could indicate a rootkit hiding connections from userspace tools
+    let mut hidden_connections = Vec::new();
 
-    if let Ok(output) = output {
-        let ss_output = String::from_utf8_lossy(&output.stdout);
-        let ss_count = ss_output.lines().count().saturating_sub(1);
+    for proc_conn in &proc_connections {
+        // Check if it's not just a transient or wildcard connection
+        if is_likely_formatting_difference(proc_conn) {
+            continue;
+        }
 
-        // If there's a significant discrepancy, it might indicate hidden connections
-        let diff = (proc_tcp_count as i32 - ss_count as i32).abs();
-        if diff > 5 {
-            findings.push(
-                Finding::high(
-                    "rootkit",
-                    "Connection Count Mismatch",
-                    &format!(
-                        "Discrepancy between /proc/net/tcp ({}) and ss output ({}) - possible hidden connections",
-                        proc_tcp_count, ss_count
-                    ),
-                )
-                .with_remediation("Investigate for rootkit: Compare 'ss -tan' with /proc/net/tcp"),
-            );
+        // Look for matching connection in ss output (ignoring state differences)
+        let found = ss_connections
+            .iter()
+            .any(|ss_conn| connections_match(proc_conn, ss_conn));
+
+        if !found {
+            hidden_connections.push(proc_conn.clone());
         }
     }
 
+    // Only report if we have a significant number of hidden connections
+    // (1-2 could be timing/formatting differences, but >5 is suspicious)
+    if hidden_connections.len() > 5 {
+        let example_conns: Vec<String> = hidden_connections
+            .iter()
+            .take(3)
+            .map(|c| {
+                format!(
+                    "{}:{} -> {}:{}",
+                    c.local_ip, c.local_port, c.remote_ip, c.remote_port
+                )
+            })
+            .collect();
+
+        findings.push(
+            Finding::high(
+                "rootkit",
+                "Hidden Network Connections Detected",
+                &format!(
+                    "{} connections visible in /proc/net/tcp but hidden from 'ss' tool - possible rootkit. Examples: {}",
+                    hidden_connections.len(),
+                    example_conns.join(", ")
+                ),
+            )
+            .with_remediation("Investigate for rootkit: Check processes for hidden connections, scan with rkhunter/chkrootkit"),
+        );
+    }
+
     Ok(findings)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Connection {
+    local_ip: String,
+    local_port: u16,
+    remote_ip: String,
+    remote_port: u16,
+    state: String,
+}
+
+/// Parse /proc/net/tcp and /proc/net/tcp6 into a set of connections
+fn parse_proc_connections() -> std::collections::HashSet<Connection> {
+    let mut connections = std::collections::HashSet::new();
+
+    // Parse IPv4
+    if let Ok(content) = fs::read_to_string("/proc/net/tcp") {
+        for line in content.lines().skip(1) {
+            if let Some(conn) = parse_proc_line(line) {
+                connections.insert(conn);
+            }
+        }
+    }
+
+    // Parse IPv6
+    if let Ok(content) = fs::read_to_string("/proc/net/tcp6") {
+        for line in content.lines().skip(1) {
+            if let Some(conn) = parse_proc_line(line) {
+                connections.insert(conn);
+            }
+        }
+    }
+
+    connections
+}
+
+/// Parse a single line from /proc/net/tcp
+fn parse_proc_line(line: &str) -> Option<Connection> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 4 {
+        return None;
+    }
+
+    let local = parse_proc_addr(parts[1])?;
+    let remote = parse_proc_addr(parts[2])?;
+    let state = parts[3];
+
+    Some(Connection {
+        local_ip: local.0,
+        local_port: local.1,
+        remote_ip: remote.0,
+        remote_port: remote.1,
+        state: state.to_string(),
+    })
+}
+
+/// Parse connections from ss output
+fn parse_ss_connections() -> std::collections::HashSet<Connection> {
+    let mut connections = std::collections::HashSet::new();
+
+    if let Ok(output) = std::process::Command::new("ss").args(["-tan"]).output() {
+        let ss_output = String::from_utf8_lossy(&output.stdout);
+
+        for line in ss_output.lines().skip(1) {
+            if let Some(conn) = parse_ss_line(line) {
+                connections.insert(conn);
+            }
+        }
+    }
+
+    connections
+}
+
+/// Parse a single line from ss output
+fn parse_ss_line(line: &str) -> Option<Connection> {
+    // ss output format: State Recv-Q Send-Q Local Address:Port Peer Address:Port
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 5 {
+        return None;
+    }
+
+    let state = parts[0];
+    let local_addr = parts[3];
+    let remote_addr = parts[4];
+
+    // Parse local address
+    let local = parse_ss_addr(local_addr)?;
+    let remote = parse_ss_addr(remote_addr)?;
+
+    Some(Connection {
+        local_ip: local.0,
+        local_port: local.1,
+        remote_ip: remote.0,
+        remote_port: remote.1,
+        state: state.to_string(),
+    })
+}
+
+/// Parse ss address format (ip:port or [ipv6]:port)
+fn parse_ss_addr(addr: &str) -> Option<(String, u16)> {
+    // Handle wildcard addresses
+    if addr == "0.0.0.0:*" || addr == "*:*" {
+        return Some(("0.0.0.0".to_string(), 0));
+    }
+    if addr == "[::]:*" || addr == ":::*" {
+        return Some(("::".to_string(), 0));
+    }
+
+    // Handle IPv6 with brackets: [::1]:22
+    if addr.starts_with('[') {
+        if let Some(bracket_end) = addr.find("]:") {
+            let ip = &addr[1..bracket_end]; // Extract IP without brackets
+            let port_str = &addr[bracket_end + 2..]; // Port after ]:
+            let port = port_str.parse().ok()?;
+            return Some((ip.to_string(), port));
+        }
+    }
+
+    // Handle IPv4 format: IP:Port
+    // Split from the right to handle IPv6 addresses without brackets
+    if let Some(colon_pos) = addr.rfind(':') {
+        let ip = &addr[..colon_pos];
+        let port_str = &addr[colon_pos + 1..];
+
+        // Handle wildcard port
+        if port_str == "*" {
+            return Some((ip.to_string(), 0));
+        }
+
+        let port = port_str.parse().ok()?;
+        return Some((ip.to_string(), port));
+    }
+
+    None
+}
+
+/// Check if two connections match (ignoring state format differences)
+fn connections_match(proc_conn: &Connection, ss_conn: &Connection) -> bool {
+    // Compare IPs and ports (the actual connection tuple)
+    proc_conn.local_ip == ss_conn.local_ip
+        && proc_conn.local_port == ss_conn.local_port
+        && proc_conn.remote_ip == ss_conn.remote_ip
+        && proc_conn.remote_port == ss_conn.remote_port
+    // Note: We don't compare state because /proc uses hex codes and ss uses text
+}
+
+/// Check if connection difference is likely just a formatting issue
+fn is_likely_formatting_difference(conn: &Connection) -> bool {
+    // LISTEN sockets with 0.0.0.0 might show as * in ss (state 0A = LISTEN)
+    if (conn.state == "0A" || conn.state == "LISTEN") && conn.local_ip == "0.0.0.0" {
+        return true;
+    }
+
+    // Wildcard remote addresses (common in LISTEN state)
+    if conn.remote_ip == "0.0.0.0" && conn.remote_port == 0 {
+        return true;
+    }
+
+    // TIME-WAIT and CLOSE-WAIT states can disappear quickly
+    // State codes: 06=TIME_WAIT, 08=CLOSE_WAIT
+    if conn.state == "06"
+        || conn.state == "08"
+        || conn.state == "TIME-WAIT"
+        || conn.state == "CLOSE-WAIT"
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Parse /proc/net address format (hex IP:port)
