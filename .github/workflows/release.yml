@@ -360,7 +360,7 @@ jobs:
           sha512sum *.deb *.rpm *.pkg.tar.zst *.apk 2>/dev/null > SHA512SUMS || true
 
       - name: Generate build provenance (attestation)
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: |
             *.deb
