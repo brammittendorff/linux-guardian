@@ -123,7 +123,7 @@ jobs:
           apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Package signing: We DON'T sign in CI/CD for security reasons
       # Instead we rely on:
@@ -390,7 +390,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: gh-pages
 
