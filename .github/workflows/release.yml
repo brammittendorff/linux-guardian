@@ -22,6 +22,7 @@ jobs:
     name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           # Debian/Ubuntu packages (.deb)
@@ -94,6 +95,9 @@ jobs:
     container: ${{ matrix.container }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
       - name: Install dependencies (Debian/Ubuntu)
         if: matrix.package_type == 'deb'
         run: |
@@ -121,9 +125,6 @@ jobs:
         if: matrix.package_type == 'apk'
         run: |
           apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk
-
-      - name: Checkout code
-        uses: actions/checkout@v5
 
       # Package signing: We DON'T sign in CI/CD for security reasons
       # Instead we rely on:
@@ -201,7 +202,7 @@ jobs:
 
           # Build package
           dpkg-deb --build "$PKG_NAME"
-          DEB_FILE="linux-guardian_${VERSION}_${{ matrix.distro }}_${ARCH}.deb"
+          DEB_FILE="linux-guardian_${VERSION}_${{ matrix.distro }}-${{ matrix.version }}_${ARCH}.deb"
           mv "${PKG_NAME}.deb" "$DEB_FILE"
 
           # Sign package if GPG key is available
