@@ -299,7 +299,7 @@ jobs:
           options=('!debug' '!strip')
 
           package() {
-              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\${pkgdir}/usr/local/bin/linux-guardian"
+              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\${pkgdir}/usr/bin/linux-guardian"
               install -dm755 "\${pkgdir}/var/cache/linux-guardian"
           }
           EOF
@@ -351,7 +351,7 @@ jobs:
           options="!check"
 
           package() {
-              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\$pkgdir/usr/local/bin/linux-guardian"
+              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\$pkgdir/usr/bin/linux-guardian"
               install -dm755 "\$pkgdir/var/cache/linux-guardian"
           }
           EOF
