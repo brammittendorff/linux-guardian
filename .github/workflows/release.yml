@@ -296,6 +296,7 @@ jobs:
           url="https://github.com/brammittendorff/linux-guardian"
           license=('MIT' 'Apache')
           depends=()
+          options=('!debug' '!strip')
 
           package() {
               install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\${pkgdir}/usr/local/bin/linux-guardian"
@@ -309,7 +310,9 @@ jobs:
           # Build as non-root user
           cd archpkg
           su builder -c "makepkg --skipinteg --skippgpcheck"
-          mv *.pkg.tar.zst "../linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst"
+
+          # Move the main package (not the debug package)
+          mv linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst "../linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst"
 
       - name: Build Alpine APK package
         if: matrix.package_type == 'apk'
@@ -317,9 +320,23 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # Setup abuild
+          # Setup abuild directories and config
           mkdir -p ~/packages/main/x86_64
           mkdir -p ~/apkbuild
+          mkdir -p ~/.abuild
+
+          # Generate signing keys manually
+          openssl genrsa -out ~/.abuild/builder.rsa 2048
+          openssl rsa -in ~/.abuild/builder.rsa -pubout -out ~/.abuild/builder.rsa.pub
+
+          # Install the public key
+          cp ~/.abuild/builder.rsa.pub /etc/apk/keys/
+
+          # Configure abuild to use our key
+          cat > ~/.abuild/abuild.conf <<ABCONF
+          PACKAGER="Linux Guardian CI <noreply@github.com>"
+          PACKAGER_PRIVKEY="$HOME/.abuild/builder.rsa"
+          ABCONF
 
           # Create APKBUILD
           cat > ~/apkbuild/APKBUILD <<EOF
@@ -340,7 +357,6 @@ jobs:
           EOF
 
           cd ~/apkbuild
-          abuild-keygen -a -i -n || true
           abuild -F
           find ~/packages -name "*.apk" -exec cp {} "${GITHUB_WORKSPACE}/linux-guardian-${VERSION}-r0.${{ matrix.arch }}.apk" \;
 
