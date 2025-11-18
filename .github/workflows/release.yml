@@ -373,8 +373,17 @@ jobs:
       - name: Generate checksums
         shell: bash
         run: |
-          sha256sum *.deb *.rpm *.pkg.tar.zst *.apk 2>/dev/null > SHA256SUMS || true
-          sha512sum *.deb *.rpm *.pkg.tar.zst *.apk 2>/dev/null > SHA512SUMS || true
+          # Generate checksums only for files that exist
+          shopt -s nullglob
+          packages=(*.deb *.rpm *.pkg.tar.zst *.apk)
+          if [ ${#packages[@]} -gt 0 ]; then
+            sha256sum "${packages[@]}" > SHA256SUMS
+            sha512sum "${packages[@]}" > SHA512SUMS
+            echo "Generated checksums for: ${packages[@]}"
+          else
+            echo "No package files found to checksum"
+            exit 1
+          fi
 
       - name: Generate build provenance (attestation)
         uses: actions/attest-build-provenance@v3
