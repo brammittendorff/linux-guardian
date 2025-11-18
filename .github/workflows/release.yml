@@ -299,7 +299,7 @@ jobs:
           options=('!debug' '!strip')
 
           package() {
-              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\${pkgdir}/usr/local/bin/linux-guardian"
+              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\${pkgdir}/usr/bin/linux-guardian"
               install -dm755 "\${pkgdir}/var/cache/linux-guardian"
           }
           EOF
@@ -351,7 +351,7 @@ jobs:
           options="!check"
 
           package() {
-              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\$pkgdir/usr/local/bin/linux-guardian"
+              install -Dm755 "${GITHUB_WORKSPACE}/target/release/linux-guardian" "\$pkgdir/usr/bin/linux-guardian"
               install -dm755 "\$pkgdir/var/cache/linux-guardian"
           }
           EOF
@@ -424,6 +424,13 @@ jobs:
           find packages -name "*.pkg.tar.zst" -exec cp {} repo/arch/ \;
           find packages -name "*.apk" -exec cp {} repo/alpine/ \;
 
+          # Generate checksums for each repo
+          cd repo/deb && sha256sum *.deb > SHA256SUMS 2>/dev/null || true
+          cd ../rpm && sha256sum *.rpm > SHA256SUMS 2>/dev/null || true
+          cd ../arch && sha256sum *.pkg.tar.zst > SHA256SUMS 2>/dev/null || true
+          cd ../alpine && sha256sum *.apk > SHA256SUMS 2>/dev/null || true
+          cd ../..
+
       - name: Generate DEB repository
         run: |
           sudo apt-get update
@@ -457,13 +464,53 @@ jobs:
           cat > repo/README.md <<'EOF'
           # Linux Guardian Package Repository
 
+          ## 🔐 Package Verification
+
+          All packages are cryptographically verified using:
+          - **SHA256 checksums** - Available in each repository directory
+          - **GitHub Attestations** - Cryptographically signed build provenance from GitHub
+
+          ### Verify with GitHub Attestations (Recommended)
+
+          ```bash
+          # Install GitHub CLI if not already installed
+          # See: https://cli.github.com/
+
+          # Download package and verify attestation
+          gh attestation verify <package-file> -R brammittendorff/linux-guardian
+          ```
+
+          ### Verify with SHA256 Checksums
+
+          ```bash
+          # Download the package and SHA256SUMS file
+          wget https://brammittendorff.github.io/linux-guardian/repo/deb/SHA256SUMS
+          wget https://brammittendorff.github.io/linux-guardian/repo/deb/linux-guardian_*_amd64.deb
+
+          # Verify checksum
+          sha256sum -c SHA256SUMS 2>&1 | grep OK
+          ```
+
+          ---
+
           ## Debian/Ubuntu
 
           ```bash
-          # Add repository
-          echo "deb [trusted=yes] https://brammittendorff.github.io/linux-guardian/repo/deb ./" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+          # Download the package for your Ubuntu/Debian version
+          # Example for Ubuntu 24.04 (Noble):
+          wget https://brammittendorff.github.io/linux-guardian/repo/deb/linux-guardian_*_ubuntu-noble_amd64.deb
 
-          # Update and install
+          # Download checksum file
+          wget https://brammittendorff.github.io/linux-guardian/repo/deb/SHA256SUMS
+
+          # Verify checksum
+          sha256sum -c SHA256SUMS 2>&1 | grep linux-guardian
+
+          # Install
+          sudo dpkg -i linux-guardian_*_ubuntu-noble_amd64.deb
+
+          # Alternative: Add repository (bypasses signature verification)
+          echo "deb [trusted=yes] https://brammittendorff.github.io/linux-guardian/repo/deb ./" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
           sudo apt update
           sudo apt install linux-guardian
           ```
@@ -471,7 +518,20 @@ jobs:
           ## Fedora/RHEL/Rocky Linux
 
           ```bash
-          # Add repository
+          # Download the package for your distro
+          # Example for Fedora 40:
+          wget https://brammittendorff.github.io/linux-guardian/repo/rpm/linux-guardian-*-1.fedora40.x86_64.rpm
+
+          # Download checksum file
+          wget https://brammittendorff.github.io/linux-guardian/repo/rpm/SHA256SUMS
+
+          # Verify checksum
+          sha256sum -c SHA256SUMS 2>&1 | grep linux-guardian
+
+          # Install
+          sudo dnf install ./linux-guardian-*-1.fedora40.x86_64.rpm
+
+          # Alternative: Add repository (bypasses signature verification)
           sudo tee /etc/yum.repos.d/linux-guardian.repo <<'REPO'
           [linux-guardian]
           name=Linux Guardian Repository
@@ -479,30 +539,70 @@ jobs:
           enabled=1
           gpgcheck=0
           REPO
-
-          # Install
           sudo dnf install linux-guardian
           ```
 
           ## Arch Linux
 
           ```bash
-          # Download and install directly
+          # Download package and checksum
           wget https://brammittendorff.github.io/linux-guardian/repo/arch/linux-guardian-*.pkg.tar.zst
+          wget https://brammittendorff.github.io/linux-guardian/repo/arch/SHA256SUMS
+
+          # Verify checksum
+          sha256sum -c SHA256SUMS 2>&1 | grep linux-guardian
+
+          # Install
           sudo pacman -U linux-guardian-*.pkg.tar.zst
           ```
 
           ## Alpine Linux
 
           ```bash
-          # Download and install directly
+          # Download package and checksum
           wget https://brammittendorff.github.io/linux-guardian/repo/alpine/linux-guardian-*.apk
+          wget https://brammittendorff.github.io/linux-guardian/repo/alpine/SHA256SUMS
+
+          # Verify checksum
+          sha256sum -c SHA256SUMS 2>&1 | grep linux-guardian
+
+          # Install
           sudo apk add --allow-untrusted linux-guardian-*.apk
           ```
 
-          ## Direct Downloads
+          ---
 
-          All packages are also available as release assets: https://github.com/brammittendorff/linux-guardian/releases/latest
+          ## 🎯 Recommended: Install from GitHub Releases
+
+          For maximum security, download packages directly from GitHub releases which include cryptographic attestations:
+
+          **https://github.com/brammittendorff/linux-guardian/releases/latest**
+
+          Each release includes:
+          - Pre-built packages for all supported distributions
+          - SHA256 and SHA512 checksum files
+          - GitHub-signed build attestations (verify with `gh attestation verify`)
+
+          ### Example with GitHub Attestation Verification
+
+          ```bash
+          # Download from GitHub release
+          wget https://github.com/brammittendorff/linux-guardian/releases/download/v0.0.4/linux-guardian_0.0.4_ubuntu-noble_amd64.deb
+
+          # Verify with GitHub CLI (requires gh CLI installed)
+          gh attestation verify linux-guardian_0.0.4_ubuntu-noble_amd64.deb -R brammittendorff/linux-guardian
+
+          # Install
+          sudo dpkg -i linux-guardian_0.0.4_ubuntu-noble_amd64.deb
+          ```
+
+          ---
+
+          ## ℹ️ Security Notes
+
+          - **Repository installations** using `trusted=yes` or `gpgcheck=0` bypass signature verification. Use checksum verification instead.
+          - **Alpine APK** packages use CI-generated signing keys that change per build. Use checksum verification.
+          - **GitHub Attestations** provide the strongest verification - they cryptographically prove the package was built by this repository's GitHub Actions workflow.
           EOF
 
       - name: Commit and push repository
