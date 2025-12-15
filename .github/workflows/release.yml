@@ -361,7 +361,7 @@ jobs:
           find ~/packages -name "*.apk" -exec cp {} "${GITHUB_WORKSPACE}/linux-guardian-${VERSION}-r0.${{ matrix.arch }}.apk" \;
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: package-${{ matrix.distro }}-${{ matrix.version }}-${{ matrix.arch }}
           path: |
