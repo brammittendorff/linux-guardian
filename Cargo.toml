@@ -29,7 +29,7 @@ nix = { version = "0.30", features = ["user", "process", "fs"] }
 procfs = { version = "0.18", default-features = false }
 
 # Async runtime for parallel execution
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 futures = "0.3"
 
 # HTTP client for CVE database downloads
