@@ -25,7 +25,7 @@ toml = "0.9"
 
 # System interfaces
 libc = "0.2"
-nix = { version = "0.30", features = ["user", "process", "fs"] }
+nix = { version = "0.31", features = ["user", "process", "fs"] }
 procfs = { version = "0.18", default-features = false }
 
 # Async runtime for parallel execution
