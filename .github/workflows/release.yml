@@ -103,28 +103,28 @@ jobs:
         if: matrix.package_type == 'deb'
         run: |
           apt-get update
-          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg
 
       - name: Install dependencies (Fedora/Rocky)
         if: matrix.package_type == 'rpm'
         run: |
           if command -v dnf &> /dev/null; then
             dnf upgrade -y --refresh || dnf upgrade -y
-            dnf install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
+            dnf install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools gnupg2
           else
             yum upgrade -y
-            yum install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
+            yum install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools gnupg2
           fi
 
       - name: Install dependencies (Arch)
         if: matrix.package_type == 'pkg.tar.zst'
         run: |
-          pacman -Syu --noconfirm curl base-devel openssl git ca-certificates bash binutils fakeroot
+          pacman -Syu --noconfirm curl base-devel openssl git ca-certificates bash binutils fakeroot gnupg
 
       - name: Install dependencies (Alpine)
         if: matrix.package_type == 'apk'
         run: |
-          apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk
+          apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk gnupg
 
       - name: Import GPG key
         if: env.GPG_PRIVATE_KEY != ''
