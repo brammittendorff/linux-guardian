@@ -103,7 +103,7 @@ jobs:
         if: matrix.package_type == 'deb'
         run: |
           apt-get update
-          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg dpkg-sig
 
       - name: Install dependencies (Fedora/Rocky)
         if: matrix.package_type == 'rpm'
@@ -195,7 +195,7 @@ jobs:
           chmod 755 "$PKG_NAME/usr/local/bin/linux-guardian"
 
           cp README.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
-          cp CONTRIBUTING.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
+          cp docs/CONTRIBUTING.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
 
           cat > "$PKG_NAME/DEBIAN/control" <<EOF
           Package: linux-guardian
@@ -266,10 +266,10 @@ jobs:
           MACROS
           fi
 
+          rpmbuild -bb ~/rpmbuild/SPECS/linux-guardian.spec
+
           if [ "$GPG_AVAILABLE" = "true" ]; then
-            rpmbuild -bb --sign ~/rpmbuild/SPECS/linux-guardian.spec
-          else
-            rpmbuild -bb ~/rpmbuild/SPECS/linux-guardian.spec
+            rpm --addsign ~/rpmbuild/RPMS/*/*.rpm || true
           fi
 
           RPM_FILE="linux-guardian-${VERSION}-1.${{ matrix.distro }}${{ matrix.version }}.${{ matrix.arch }}.rpm"
