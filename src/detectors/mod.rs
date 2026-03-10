@@ -18,6 +18,7 @@ pub mod malware_hash_db;
 pub mod malware_hashes;
 pub mod mandatory_access_control;
 pub mod memory_security;
+pub mod memory_threats;
 pub mod network;
 pub mod nvd_database;
 pub mod package_integrity;

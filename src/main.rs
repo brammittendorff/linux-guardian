@@ -315,6 +315,9 @@ async fn run_scan(
                 tokio::spawn(process::detect_suspicious_processes()),
                 tokio::spawn(network::analyze_connections()),
                 tokio::spawn(network::analyze_traffic_patterns()),
+                tokio::spawn(detectors::memory_threats::detect_fileless_malware()),
+                tokio::spawn(detectors::memory_threats::detect_process_masquerading()),
+                tokio::spawn(detectors::memory_threats::detect_ld_preload_injection()),
             ];
 
             if !args.no_malware {
@@ -365,6 +368,11 @@ async fn run_scan(
                 tokio::spawn(detectors::process_capabilities::check_file_capabilities()),
                 tokio::spawn(detectors::memory_security::detect_memory_injection()),
                 tokio::spawn(detectors::memory_security::check_core_dumps()),
+                tokio::spawn(detectors::memory_threats::detect_fileless_malware()),
+                tokio::spawn(detectors::memory_threats::detect_process_masquerading()),
+                tokio::spawn(detectors::memory_threats::detect_ld_preload_injection()),
+                tokio::spawn(detectors::memory_threats::deep_scan_process_memory(is_root)),
+                tokio::spawn(detectors::memory_threats::detect_process_hollowing(is_root)),
             ];
 
             if !args.no_malware {
@@ -401,6 +409,9 @@ async fn run_fast_checks(is_root: bool) -> Result<Vec<linux_guardian::models::Fi
         tokio::spawn(detectors::process::detect_suspicious_processes()),
         tokio::spawn(detectors::network::analyze_connections()),
         tokio::spawn(detectors::network::analyze_traffic_patterns()),
+        tokio::spawn(detectors::memory_threats::detect_fileless_malware()),
+        tokio::spawn(detectors::memory_threats::detect_process_masquerading()),
+        tokio::spawn(detectors::memory_threats::detect_ld_preload_injection()),
     ];
 
     for handle in handles {
@@ -529,7 +540,7 @@ fn print_banner() {
     );
     println!(
         "{}",
-        "║         🛡️  LINUX GUARDIAN - Security Scanner 🛡️          ║".bright_cyan()
+        "║             LINUX GUARDIAN - Security Scanner             ║".bright_cyan()
     );
     println!(
         "{}",
