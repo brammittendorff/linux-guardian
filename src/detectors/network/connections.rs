@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::fs;
 use tracing::debug;
 
-use super::SUSPICIOUS_PORTS;
 use super::services::{fingerprint_services_batch, test_ports_parallel};
+use super::SUSPICIOUS_PORTS;
 
 /// A parsed TCP/UDP connection entry
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::fs;
 use tracing::{debug, info};
 
-use super::{BeaconPattern, ConnectionHistory, ConnectionSnapshot};
 use super::connections::{get_process_by_inode, is_suspicious_network_process};
-use super::services::fingerprint_service;
 use super::get_connection_history_path;
+use super::services::fingerprint_service;
+use super::{BeaconPattern, ConnectionHistory, ConnectionSnapshot};
 
 /// Check for DNS tunneling indicators
 pub async fn detect_dns_tunneling() -> Result<Vec<Finding>> {

@@ -427,10 +427,7 @@ fn prompt_yn(question: &str, default_yes: bool) -> bool {
 }
 
 async fn run_setup() -> Result<()> {
-    println!(
-        "{}",
-        "Linux Guardian - Setup\n".bold().bright_cyan()
-    );
+    println!("{}", "Linux Guardian - Setup\n".bold().bright_cyan());
 
     // 1. Check databases
     let has_cve = cve_database_exists();
@@ -453,29 +450,32 @@ async fn run_setup() -> Result<()> {
     }
 
     // 2. Download CVE database
-    if !has_cve {
-        if prompt_yn("Download CVE database? (~50MB, CISA KEV + NVD)", true) {
-            println!();
-            if let Err(e) = linux_guardian::cve_db::update_database().await {
-                eprintln!("{}", format!("CVE database failed: {}", e).red());
-            } else {
-                println!("{}", "CVE database ready.".green());
-            }
-            println!();
+    if !has_cve
+        && prompt_yn("Download CVE database? (~50MB, CISA KEV + NVD)", true)
+    {
+        println!();
+        if let Err(e) = linux_guardian::cve_db::update_database().await {
+            eprintln!("{}", format!("CVE database failed: {}", e).red());
+        } else {
+            println!("{}", "CVE database ready.".green());
         }
+        println!();
     }
 
     // 3. Download malware hash database
-    if !has_malware {
-        if prompt_yn("Download malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)", true) {
-            println!();
-            if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
-                eprintln!("{}", format!("Malware database failed: {}", e).red());
-            } else {
-                println!("{}", "Malware hash database ready.".green());
-            }
-            println!();
+    if !has_malware
+        && prompt_yn(
+            "Download malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)",
+            true,
+        )
+    {
+        println!();
+        if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
+            eprintln!("{}", format!("Malware database failed: {}", e).red());
+        } else {
+            println!("{}", "Malware hash database ready.".green());
         }
+        println!();
     }
 
     // 4. Show privilege info
@@ -502,16 +502,18 @@ async fn run_setup() -> Result<()> {
 
         print_banner();
         let start = Instant::now();
-        let findings =
-            run_scan(&scan_args, ScanMode::Fast, is_root, &server_context, &suppression_config)
-                .await?;
+        let findings = run_scan(
+            &scan_args,
+            ScanMode::Fast,
+            is_root,
+            &server_context,
+            &suppression_config,
+        )
+        .await?;
         let duration = start.elapsed();
 
         output::print_findings(&findings, OutputStyle::Terminal, false, false);
-        println!(
-            "\n  Scan completed in {:.2}s",
-            duration.as_secs_f32()
-        );
+        println!("\n  Scan completed in {:.2}s", duration.as_secs_f32());
     }
 
     println!("\n{}", "Setup complete!".green().bold());
@@ -551,13 +553,13 @@ fn print_privilege_warning(mode: &ScanMode) {
 
     match mode {
         ScanMode::Fast => {
-            println!("{}", "  Fast mode uses mostly non-privileged checks".dimmed());
-        }
-        _ => {
             println!(
                 "{}",
-                "  Run with sudo for complete analysis".dimmed()
+                "  Fast mode uses mostly non-privileged checks".dimmed()
             );
+        }
+        _ => {
+            println!("{}", "  Run with sudo for complete analysis".dimmed());
         }
     }
 
@@ -723,17 +725,19 @@ fn cve_database_exists() -> bool {
         paths.push(std::path::PathBuf::from(home).join(".cache/linux-guardian/cve.db"));
     }
     paths.iter().any(|p| {
-        p.exists() && std::fs::metadata(p).map(|m| m.len() > 100_000).unwrap_or(false)
+        p.exists()
+            && std::fs::metadata(p)
+                .map(|m| m.len() > 100_000)
+                .unwrap_or(false)
     })
 }
 
 fn malware_database_exists() -> bool {
-    let mut paths =
-        vec![std::path::PathBuf::from("/var/cache/linux-guardian/malware_hashes.csv")];
+    let mut paths = vec![std::path::PathBuf::from(
+        "/var/cache/linux-guardian/malware_hashes.csv",
+    )];
     if let Ok(home) = std::env::var("HOME") {
-        paths.push(
-            std::path::PathBuf::from(home).join(".cache/linux-guardian/malware_hashes.csv"),
-        );
+        paths.push(std::path::PathBuf::from(home).join(".cache/linux-guardian/malware_hashes.csv"));
     }
     paths.iter().any(|p| p.exists())
 }
