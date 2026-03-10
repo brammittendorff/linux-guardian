@@ -266,10 +266,10 @@ jobs:
           MACROS
           fi
 
+          rpmbuild -bb ~/rpmbuild/SPECS/linux-guardian.spec
+
           if [ "$GPG_AVAILABLE" = "true" ]; then
-            rpmbuild -bb --sign ~/rpmbuild/SPECS/linux-guardian.spec
-          else
-            rpmbuild -bb ~/rpmbuild/SPECS/linux-guardian.spec
+            rpm --addsign ~/rpmbuild/RPMS/*/*.rpm || true
           fi
 
           RPM_FILE="linux-guardian-${VERSION}-1.${{ matrix.distro }}${{ matrix.version }}.${{ matrix.arch }}.rpm"
