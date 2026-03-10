@@ -114,7 +114,9 @@ impl ServerContext {
         ports
     }
 
-    /// Check if a port is expected for this server type
+    /// Check if a port is expected for this server type.
+    /// Note: allocates a new HashSet per call. If checking multiple ports,
+    /// call `expected_ports()` once and use `contains()` on the result.
     pub fn is_port_expected(&self, port: u16) -> bool {
         self.expected_ports().contains(&port)
     }

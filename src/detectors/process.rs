@@ -258,7 +258,7 @@ async fn detect_hidden_processes() -> Result<Vec<Finding>> {
                 // CRITICAL FIX: Retry verification with small delay to avoid false positives
                 // If the process is truly hidden by a rootkit, it will still be visible in ps
                 // If it's a short-lived process, both ps and /proc will show it's gone
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
                 // Re-check /proc after delay
                 let proc_exists = std::path::Path::new(&format!("/proc/{}", pid)).exists();
@@ -345,7 +345,7 @@ async fn detect_hidden_processes() -> Result<Vec<Finding>> {
 
                 // ROBUST RACE CONDITION HANDLING (reverse case)
                 // Retry to distinguish short-lived processes from actual hiding
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
                 // Re-check /proc after delay
                 let proc_still_exists = std::path::Path::new(&format!("/proc/{}", pid)).exists();
@@ -497,8 +497,6 @@ pub async fn detect_suspicious_network_processes() -> Result<Vec<Finding>> {
 
     // Parse /proc/net/tcp and /proc/net/udp to find listening processes
     let tcp_content = fs::read_to_string("/proc/net/tcp").unwrap_or_default();
-    let _udp_content = fs::read_to_string("/proc/net/udp").unwrap_or_default();
-
     // Track processes with listening sockets
     let mut listening_processes = HashSet::new();
 

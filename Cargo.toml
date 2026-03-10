@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.75"
 authors = ["Linux Guardian Contributors"]
 description = "Comprehensive Linux security scanner for detecting rootkits, malware, privilege escalation, and active attacks"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [lib]
 name = "linux_guardian"
