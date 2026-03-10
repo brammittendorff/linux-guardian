@@ -444,24 +444,31 @@ async fn run_setup() -> Result<()> {
     let has_cve = cve_database_exists();
     let has_malware = malware_database_exists();
 
-    if has_cve && has_malware {
-        println!("{}", "Databases already downloaded.".green());
-    } else {
-        if !has_cve {
-            println!("CVE database: {}", "not found".yellow());
+    println!(
+        "CVE database: {}",
+        if has_cve {
+            "installed".green()
         } else {
-            println!("CVE database: {}", "ok".green());
+            "not found".yellow()
         }
-        if !has_malware {
-            println!("Malware hash database: {}", "not found".yellow());
+    );
+    println!(
+        "Malware hash database: {}",
+        if has_malware {
+            "installed".green()
         } else {
-            println!("Malware hash database: {}", "ok".green());
+            "not found".yellow()
         }
-        println!();
-    }
+    );
+    println!();
 
-    // 2. Download CVE database
-    if !has_cve && prompt_yn("Download CVE database? (~50MB, CISA KEV + NVD)", true) {
+    // 2. Download/update CVE database
+    let cve_prompt = if has_cve {
+        "Update CVE database? (~50MB, CISA KEV + NVD)"
+    } else {
+        "Download CVE database? (~50MB, CISA KEV + NVD)"
+    };
+    if prompt_yn(cve_prompt, !has_cve) {
         println!();
         if let Err(e) = linux_guardian::cve_db::update_database().await {
             eprintln!("{}", format!("CVE database failed: {}", e).red());
@@ -471,13 +478,13 @@ async fn run_setup() -> Result<()> {
         println!();
     }
 
-    // 3. Download malware hash database
-    if !has_malware
-        && prompt_yn(
-            "Download malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)",
-            true,
-        )
-    {
+    // 3. Download/update malware hash database
+    let malware_prompt = if has_malware {
+        "Update malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)"
+    } else {
+        "Download malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)"
+    };
+    if prompt_yn(malware_prompt, !has_malware) {
         println!();
         if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
             eprintln!("{}", format!("Malware database failed: {}", e).red());
