@@ -363,8 +363,8 @@ jobs:
           shopt -s nullglob
           packages=(*.deb *.rpm *.pkg.tar.zst *.apk)
           if [ ${#packages[@]} -gt 0 ]; then
-            sha256sum "${packages[@]}" > SHA256SUMS
-            sha512sum "${packages[@]}" > SHA512SUMS
+            sha256sum "${packages[@]}" > SHA256SUMS-${{ matrix.distro }}-${{ matrix.version }}
+            sha512sum "${packages[@]}" > SHA512SUMS-${{ matrix.distro }}-${{ matrix.version }}
             echo "Generated checksums for: ${packages[@]}"
           else
             echo "No package files found to checksum"
@@ -389,8 +389,8 @@ jobs:
             *.rpm
             *.pkg.tar.zst
             *.apk
-            SHA256SUMS
-            SHA512SUMS
+            SHA256SUMS-*
+            SHA512SUMS-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
