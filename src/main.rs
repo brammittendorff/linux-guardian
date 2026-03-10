@@ -450,9 +450,7 @@ async fn run_setup() -> Result<()> {
     }
 
     // 2. Download CVE database
-    if !has_cve
-        && prompt_yn("Download CVE database? (~50MB, CISA KEV + NVD)", true)
-    {
+    if !has_cve && prompt_yn("Download CVE database? (~50MB, CISA KEV + NVD)", true) {
         println!();
         if let Err(e) = linux_guardian::cve_db::update_database().await {
             eprintln!("{}", format!("CVE database failed: {}", e).red());
