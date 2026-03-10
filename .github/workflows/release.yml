@@ -142,6 +142,8 @@ jobs:
           echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpg-connect-agent reloadagent /bye 2>/dev/null || true
+          # Test signing to cache passphrase
+          echo "test" | gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --sign --output /dev/null 2>/dev/null || true
           echo "GPG_AVAILABLE=true" >> $GITHUB_ENV
 
       - name: Install Rust
@@ -427,6 +429,8 @@ jobs:
           mkdir -p ~/.gnupg
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpg-connect-agent reloadagent /bye 2>/dev/null || true
+          # Cache passphrase in agent
+          echo "test" | gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --sign --output /dev/null 2>/dev/null || true
           echo "GPG_AVAILABLE=true" >> $GITHUB_ENV
 
           # Export public key for the repository
@@ -435,6 +439,8 @@ jobs:
           echo "Exported public GPG key to site/gpg.key"
 
       - name: Build APT repository
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           mkdir -p site/deb/pool/main/l/linux-guardian
           mkdir -p site/deb/dists/stable/main/binary-amd64
@@ -473,12 +479,14 @@ jobs:
           # Sign Release file
           cd $GITHUB_WORKSPACE
           if [ "$GPG_AVAILABLE" = "true" ]; then
-            gpg --batch --yes --pinentry-mode loopback --armor --detach-sign -o site/deb/dists/stable/Release.gpg site/deb/dists/stable/Release
-            gpg --batch --yes --pinentry-mode loopback --armor --clearsign -o site/deb/dists/stable/InRelease site/deb/dists/stable/Release
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign -o site/deb/dists/stable/Release.gpg site/deb/dists/stable/Release
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --clearsign -o site/deb/dists/stable/InRelease site/deb/dists/stable/Release
             echo "APT repository signed"
           fi
 
       - name: Build RPM repository
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           mkdir -p site/rpm/x86_64
 
@@ -498,7 +506,7 @@ jobs:
 
           # Sign repo metadata
           if [ "$GPG_AVAILABLE" = "true" ]; then
-            gpg --batch --yes --pinentry-mode loopback --armor --detach-sign -o site/rpm/x86_64/repodata/repomd.xml.asc site/rpm/x86_64/repodata/repomd.xml
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign -o site/rpm/x86_64/repodata/repomd.xml.asc site/rpm/x86_64/repodata/repomd.xml
             echo "RPM repository signed"
           fi
 
