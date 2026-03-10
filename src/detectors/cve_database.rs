@@ -29,6 +29,7 @@ struct CisaKevDatabase {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct CisaVulnerability {
+    #[serde(alias = "cveID")]
     cve_id: String,
     vendor_project: String,
     product: String,
@@ -120,11 +121,23 @@ async fn get_kev_database() -> Result<CisaKevDatabase> {
 /// Download KEV database from CISA
 async fn download_kev_database() -> Result<CisaKevDatabase> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
         .build()?;
 
     let response = client.get(CISA_KEV_URL).send().await?;
-    let kev_db: CisaKevDatabase = response.json().await?;
+
+    // Check HTTP status before reading body
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("CISA KEV download returned HTTP {}", status);
+    }
+
+    // Download body as text first for better error diagnostics and to allow
+    // caching the raw JSON even if parsing fails.
+    let body = response.text().await?;
+
+    let kev_db: CisaKevDatabase = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse KEV JSON: {} (body starts with: {:?})", e, &body[..body.len().min(200)]))?;
 
     // Save to cache
     if let Err(e) = save_kev_to_cache(&kev_db) {

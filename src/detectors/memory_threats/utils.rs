@@ -1,9 +1,39 @@
 use anyhow::Result;
+use nix::sys::uio::{process_vm_readv, RemoteIoVec};
+use nix::unistd::Pid;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{IoSliceMut, Read, Seek, SeekFrom};
 
-/// Read process memory using /proc/PID/mem
+/// Read process memory, preferring process_vm_readv(2) for performance.
+///
+/// process_vm_readv transfers data directly between address spaces without
+/// routing through kernel buffers, avoiding the open/seek/read round-trip
+/// that /proc/PID/mem requires. Falls back to /proc/PID/mem when the syscall
+/// fails (e.g. insufficient privileges or the target is a kernel thread).
 pub fn read_process_memory(pid: i32, addr: u64, size: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; size];
+
+    // process_vm_readv requires &mut [IoSliceMut] for the local side.
+    let mut local_iov = [IoSliceMut::new(&mut buf)];
+    let remote_iov = [RemoteIoVec {
+        base: addr as usize,
+        len: size,
+    }];
+
+    match process_vm_readv(Pid::from_raw(pid), &mut local_iov, &remote_iov) {
+        Ok(bytes_read) => {
+            buf.truncate(bytes_read);
+            Ok(buf)
+        }
+        Err(_) => {
+            // Fall back to /proc/PID/mem (e.g. ptrace_scope restrictions).
+            read_process_memory_proc(pid, addr, size)
+        }
+    }
+}
+
+/// Read process memory via /proc/PID/mem (fallback path).
+fn read_process_memory_proc(pid: i32, addr: u64, size: usize) -> Result<Vec<u8>> {
     let mem_path = format!("/proc/{}/mem", pid);
     let mut file = fs::File::open(&mem_path)?;
     file.seek(SeekFrom::Start(addr))?;

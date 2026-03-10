@@ -1,8 +1,10 @@
 use crate::models::Finding;
 use anyhow::Result;
+use parking_lot::Mutex;
 use procfs::process::FDTarget;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::sync::OnceLock;
 use tracing::debug;
 
 use super::services::{fingerprint_services_batch, test_ports_parallel};
@@ -330,16 +332,16 @@ pub(super) async fn detect_hidden_connections() -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
 
     let proc_connections = parse_proc_connections();
-    let ss_connections = parse_ss_connections();
+    let procfs_connections = parse_procfs_connections();
 
     let mut hidden_connections = Vec::new();
     for proc_conn in &proc_connections {
         if is_likely_formatting_difference(proc_conn) {
             continue;
         }
-        let found = ss_connections
+        let found = procfs_connections
             .iter()
-            .any(|ss_conn| connections_match(proc_conn, ss_conn));
+            .any(|procfs_conn| connections_match(proc_conn, procfs_conn));
         if !found {
             hidden_connections.push(proc_conn.clone());
         }
@@ -362,7 +364,7 @@ pub(super) async fn detect_hidden_connections() -> Result<Vec<Finding>> {
                 "rootkit",
                 "Hidden Network Connections Detected",
                 &format!(
-                    "{} connections visible in /proc/net/tcp but hidden from 'ss' tool - possible rootkit. Examples: {}",
+                    "{} connections visible in /proc/net/tcp but hidden from procfs crate view - possible rootkit. Examples: {}",
                     hidden_connections.len(),
                     example_conns.join(", ")
                 ),
@@ -412,67 +414,46 @@ fn parse_proc_line(line: &str) -> Option<Connection> {
     })
 }
 
-/// Parse connections from ss output
-fn parse_ss_connections() -> HashSet<Connection> {
+/// Parse connections from procfs crate (our "second view" for cross-referencing)
+fn parse_procfs_connections() -> HashSet<Connection> {
     let mut connections = HashSet::new();
-    if let Ok(output) = std::process::Command::new("ss").args(["-tan"]).output() {
-        let ss_output = String::from_utf8_lossy(&output.stdout);
-        for line in ss_output.lines().skip(1) {
-            if let Some(conn) = parse_ss_line(line) {
-                connections.insert(conn);
-            }
+    if let Ok(tcp_entries) = procfs::net::tcp() {
+        for entry in tcp_entries {
+            let state = match entry.state {
+                procfs::net::TcpState::Established => "ESTAB",
+                procfs::net::TcpState::Listen => "LISTEN",
+                procfs::net::TcpState::SynSent => "SYN-SENT",
+                procfs::net::TcpState::SynRecv => "SYN-RECV",
+                procfs::net::TcpState::FinWait1 => "FIN-WAIT-1",
+                procfs::net::TcpState::FinWait2 => "FIN-WAIT-2",
+                procfs::net::TcpState::TimeWait => "TIME-WAIT",
+                procfs::net::TcpState::Close => "CLOSE",
+                procfs::net::TcpState::CloseWait => "CLOSE-WAIT",
+                procfs::net::TcpState::LastAck => "LAST-ACK",
+                procfs::net::TcpState::Closing => "CLOSING",
+                _ => "UNKNOWN",
+            };
+            connections.insert(Connection {
+                local_ip: entry.local_address.ip().to_string(),
+                local_port: entry.local_address.port(),
+                remote_ip: entry.remote_address.ip().to_string(),
+                remote_port: entry.remote_address.port(),
+                state: state.to_string(),
+            });
+        }
+    }
+    if let Ok(tcp6_entries) = procfs::net::tcp6() {
+        for entry in tcp6_entries {
+            connections.insert(Connection {
+                local_ip: entry.local_address.ip().to_string(),
+                local_port: entry.local_address.port(),
+                remote_ip: entry.remote_address.ip().to_string(),
+                remote_port: entry.remote_address.port(),
+                state: "ESTAB".to_string(), // simplified
+            });
         }
     }
     connections
-}
-
-/// Parse a single line from ss output
-fn parse_ss_line(line: &str) -> Option<Connection> {
-    // ss output format: State Recv-Q Send-Q Local Address:Port Peer Address:Port
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
-    }
-    let state = parts[0];
-    let local = parse_ss_addr(parts[3])?;
-    let remote = parse_ss_addr(parts[4])?;
-    Some(Connection {
-        local_ip: local.0,
-        local_port: local.1,
-        remote_ip: remote.0,
-        remote_port: remote.1,
-        state: state.to_string(),
-    })
-}
-
-/// Parse ss address format (ip:port or [ipv6]:port)
-fn parse_ss_addr(addr: &str) -> Option<(String, u16)> {
-    if addr == "0.0.0.0:*" || addr == "*:*" {
-        return Some(("0.0.0.0".to_string(), 0));
-    }
-    if addr == "[::]:*" || addr == ":::*" {
-        return Some(("::".to_string(), 0));
-    }
-    // Handle IPv6 with brackets: [::1]:22
-    if addr.starts_with('[') {
-        if let Some(bracket_end) = addr.find("]:") {
-            let ip = &addr[1..bracket_end];
-            let port_str = &addr[bracket_end + 2..];
-            let port = port_str.parse().ok()?;
-            return Some((ip.to_string(), port));
-        }
-    }
-    // Handle IPv4 or bare IPv6
-    if let Some(colon_pos) = addr.rfind(':') {
-        let ip = &addr[..colon_pos];
-        let port_str = &addr[colon_pos + 1..];
-        if port_str == "*" {
-            return Some((ip.to_string(), 0));
-        }
-        let port = port_str.parse().ok()?;
-        return Some((ip.to_string(), port));
-    }
-    None
 }
 
 /// Check if two connections match (ignoring state format differences)
@@ -525,16 +506,41 @@ pub(super) fn parse_proc_addr(addr: &str) -> Option<(String, u16)> {
     }
 }
 
-/// Map inode to process information using procfs crate
-pub(super) fn get_process_by_inode(inode: u64) -> Option<(i32, String, String)> {
+/// Cached inode-to-process mapping for fast lookups
+struct InodeCache {
+    map: HashMap<u64, (i32, String, String)>, // inode -> (pid, exe, cmdline)
+}
+
+static INODE_CACHE: OnceLock<Mutex<InodeCache>> = OnceLock::new();
+
+/// Build the inode-to-PID mapping by scanning /proc/*/fd/ once
+fn build_inode_cache() -> InodeCache {
+    let mut map = HashMap::new();
+
     if let Ok(all_procs) = procfs::process::all_processes() {
         for proc in all_procs.flatten() {
             if let Ok(fds) = proc.fd() {
+                let pid = proc.pid;
+                // Lazily compute exe and cmdline only if we find socket inodes
+                let mut exe_cached = None;
+                let mut cmdline_cached = None;
+
                 for fd_info in fds.flatten() {
                     if let FDTarget::Socket(sock_inode) = fd_info.target {
-                        if sock_inode == inode {
-                            let cmdline = proc
-                                .cmdline()
+                        // Lazily compute exe
+                        let exe = exe_cached.get_or_insert_with(|| {
+                            proc.exe()
+                                .ok()
+                                .and_then(|p| p.to_str().map(|s| s.to_string()))
+                                .unwrap_or_else(|| {
+                                    proc.stat()
+                                        .ok()
+                                        .map(|s| s.comm)
+                                        .unwrap_or_else(|| "unknown".to_string())
+                                })
+                        });
+                        let cmdline = cmdline_cached.get_or_insert_with(|| {
+                            proc.cmdline()
                                 .ok()
                                 .and_then(|c| {
                                     if c.is_empty() {
@@ -543,25 +549,32 @@ pub(super) fn get_process_by_inode(inode: u64) -> Option<(i32, String, String)> 
                                         Some(c.join(" "))
                                     }
                                 })
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let exe = proc
-                                .exe()
-                                .ok()
-                                .and_then(|p| p.to_str().map(|s| s.to_string()))
-                                .unwrap_or_else(|| {
-                                    proc.stat()
-                                        .ok()
-                                        .map(|s| s.comm)
-                                        .unwrap_or_else(|| "unknown".to_string())
-                                });
-                            return Some((proc.pid, exe, cmdline));
-                        }
+                                .unwrap_or_else(|| "unknown".to_string())
+                        });
+
+                        map.insert(sock_inode, (pid, exe.clone(), cmdline.clone()));
                     }
                 }
             }
         }
     }
-    None
+
+    InodeCache { map }
+}
+
+/// Map inode to process information using cached mapping
+pub(super) fn get_process_by_inode(inode: u64) -> Option<(i32, String, String)> {
+    let cache = INODE_CACHE.get_or_init(|| Mutex::new(build_inode_cache()));
+    let guard = cache.lock();
+    guard.map.get(&inode).cloned()
+}
+
+/// Invalidate the inode cache (call at start of each scan)
+pub(super) fn invalidate_inode_cache() {
+    if let Some(cache) = INODE_CACHE.get() {
+        let mut guard = cache.lock();
+        *guard = build_inode_cache();
+    }
 }
 
 /// Check if a network connection is suspicious based on process AND connection characteristics
