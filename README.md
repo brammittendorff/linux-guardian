@@ -20,14 +20,21 @@ Detects active threats on your Linux system in 10-30 seconds. Built in Rust with
 
 ```bash
 curl -fsSL https://brammittendorff.github.io/linux-guardian/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/linux-guardian.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb stable main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
 sudo apt update && sudo apt install linux-guardian
 ```
 
-### Fedora / RHEL / Rocky Linux
+### Fedora
 
 ```bash
 sudo dnf config-manager addrepo --from-repofile=https://brammittendorff.github.io/linux-guardian/rpm/linux-guardian.repo
+sudo dnf install linux-guardian
+```
+
+### RHEL / Rocky Linux / AlmaLinux
+
+```bash
+sudo dnf config-manager addrepo --from-repofile=https://brammittendorff.github.io/linux-guardian/rpm/linux-guardian-el.repo
 sudo dnf install linux-guardian
 ```
 

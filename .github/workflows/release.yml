@@ -443,7 +443,6 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           mkdir -p site/deb/pool/main/l/linux-guardian
-          mkdir -p site/deb/dists/stable/main/binary-amd64
 
           # Collect all .deb files
           find artifacts/ -name "*.deb" -exec cp {} site/deb/pool/main/l/linux-guardian/ \;
@@ -456,65 +455,115 @@ jobs:
             exit 0
           fi
 
-          # Generate Packages index
-          cd site/deb
-          dpkg-scanpackages --multiversion pool/ > dists/stable/main/binary-amd64/Packages
-          gzip -k dists/stable/main/binary-amd64/Packages
+          # Create per-codename dists so each distro gets the right glibc-compatible binary
+          declare -A CODENAMES=(
+            ["debian-bookworm"]="bookworm"
+            ["debian-bullseye"]="bullseye"
+            ["ubuntu-noble"]="noble"
+            ["ubuntu-jammy"]="jammy"
+          )
 
-          # Generate Release file
-          cd dists/stable
-          cat > Release <<EOF
+          cd site/deb
+
+          for distro_version in "${!CODENAMES[@]}"; do
+            codename="${CODENAMES[$distro_version]}"
+            mkdir -p "dists/${codename}/main/binary-amd64"
+
+            # Find matching .deb for this distro
+            matching_deb=$(find pool/ -name "*_${distro_version}_*.deb" | head -1)
+            if [ -z "$matching_deb" ]; then
+              echo "No .deb found for ${distro_version}, skipping"
+              continue
+            fi
+
+            echo "Building dist for ${codename} from ${matching_deb}"
+
+            # Create a temporary pool with just this distro's deb
+            mkdir -p "tmp_pool/${codename}"
+            cp "$matching_deb" "tmp_pool/${codename}/"
+            dpkg-scanpackages "tmp_pool/${codename}/" /dev/null | sed "s|tmp_pool/${codename}/|pool/main/l/linux-guardian/|" > "dists/${codename}/main/binary-amd64/Packages"
+            gzip -k "dists/${codename}/main/binary-amd64/Packages"
+            rm -rf "tmp_pool/${codename}"
+
+            # Generate Release file
+            cd "dists/${codename}"
+            cat > Release <<EOF
           Origin: linux-guardian
           Label: Linux Guardian
-          Suite: stable
-          Codename: stable
+          Suite: ${codename}
+          Codename: ${codename}
           Architectures: amd64
           Components: main
-          Description: Linux Guardian package repository
+          Description: Linux Guardian packages for ${codename}
           EOF
 
-          # Add checksums to Release
-          apt-ftparchive release . >> Release
+            apt-ftparchive release . >> Release
 
-          # Sign Release file
-          cd $GITHUB_WORKSPACE
-          if [ "$GPG_AVAILABLE" = "true" ]; then
-            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign -o site/deb/dists/stable/Release.gpg site/deb/dists/stable/Release
-            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --clearsign -o site/deb/dists/stable/InRelease site/deb/dists/stable/Release
-            echo "APT repository signed"
+            # Sign Release file
+            if [ "$GPG_AVAILABLE" = "true" ]; then
+              echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign -o Release.gpg Release
+              echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --clearsign -o InRelease Release
+              echo "Signed ${codename} release"
+            fi
+
+            cd "$GITHUB_WORKSPACE/site/deb"
+          done
+
+          rm -rf tmp_pool
+
+          # Also create a "stable" dist using the oldest glibc build (bullseye) as fallback
+          if [ -d "dists/bullseye" ]; then
+            cp -r dists/bullseye dists/stable
+            echo "Created stable dist from bullseye (broadest compatibility)"
           fi
 
       - name: Build RPM repository
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          mkdir -p site/rpm/x86_64
+          # Create per-distro RPM repos
+          declare -A RPM_DISTROS=(
+            ["fedora40"]="fedora/40"
+            ["fedora39"]="fedora/39"
+            ["rockylinux9"]="el/9"
+          )
 
-          # Collect all .rpm files
-          find artifacts/ -name "*.rpm" -exec cp {} site/rpm/x86_64/ \;
+          for distro_key in "${!RPM_DISTROS[@]}"; do
+            repo_path="${RPM_DISTROS[$distro_key]}"
+            mkdir -p "site/rpm/${repo_path}/x86_64"
 
-          RPM_COUNT=$(find site/rpm/x86_64 -name "*.rpm" | wc -l)
-          echo "Found $RPM_COUNT .rpm packages"
+            # Find matching RPM
+            matching_rpm=$(find artifacts/ -name "*${distro_key}*.rpm" | head -1)
+            if [ -z "$matching_rpm" ]; then
+              echo "No RPM found for ${distro_key}, skipping"
+              continue
+            fi
 
-          if [ "$RPM_COUNT" -eq 0 ]; then
-            echo "No .rpm packages found, skipping RPM repo"
-            exit 0
-          fi
+            echo "Building RPM repo for ${repo_path} from ${matching_rpm}"
+            cp "$matching_rpm" "site/rpm/${repo_path}/x86_64/"
+            createrepo_c "site/rpm/${repo_path}/x86_64/"
 
-          # Create repo metadata
-          createrepo_c site/rpm/x86_64/
+            if [ "$GPG_AVAILABLE" = "true" ]; then
+              echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign -o "site/rpm/${repo_path}/x86_64/repodata/repomd.xml.asc" "site/rpm/${repo_path}/x86_64/repodata/repomd.xml"
+              echo "Signed ${repo_path} RPM repo"
+            fi
+          done
 
-          # Sign repo metadata
-          if [ "$GPG_AVAILABLE" = "true" ]; then
-            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign -o site/rpm/x86_64/repodata/repomd.xml.asc site/rpm/x86_64/repodata/repomd.xml
-            echo "RPM repository signed"
-          fi
-
-          # Create .repo file for easy setup
-          cat > site/rpm/linux-guardian.repo <<EOF
+          # Create .repo file for Fedora (uses $releasever)
+          cat > site/rpm/linux-guardian.repo <<'EOF'
           [linux-guardian]
           name=Linux Guardian
-          baseurl=https://brammittendorff.github.io/linux-guardian/rpm/x86_64
+          baseurl=https://brammittendorff.github.io/linux-guardian/rpm/fedora/$releasever/x86_64
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://brammittendorff.github.io/linux-guardian/gpg.key
+          EOF
+
+          # Create EL-specific .repo file for Rocky/RHEL/AlmaLinux
+          cat > site/rpm/linux-guardian-el.repo <<'EOF'
+          [linux-guardian]
+          name=Linux Guardian
+          baseurl=https://brammittendorff.github.io/linux-guardian/rpm/el/$releasever/x86_64
           enabled=1
           gpgcheck=1
           gpgkey=https://brammittendorff.github.io/linux-guardian/gpg.key
@@ -532,13 +581,18 @@ jobs:
           <h2>Debian / Ubuntu</h2>
           <pre>
           curl -fsSL https://brammittendorff.github.io/linux-guardian/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/linux-guardian.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb stable main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
           sudo apt update
           sudo apt install linux-guardian
           </pre>
-          <h2>Fedora / RHEL / Rocky Linux</h2>
+          <h2>Fedora</h2>
           <pre>
           sudo dnf config-manager addrepo --from-repofile=https://brammittendorff.github.io/linux-guardian/rpm/linux-guardian.repo
+          sudo dnf install linux-guardian
+          </pre>
+          <h2>RHEL / Rocky Linux / AlmaLinux</h2>
+          <pre>
+          sudo dnf config-manager addrepo --from-repofile=https://brammittendorff.github.io/linux-guardian/rpm/linux-guardian-el.repo
           sudo dnf install linux-guardian
           </pre>
           <h2>From source</h2>
