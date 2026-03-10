@@ -103,7 +103,7 @@ jobs:
         if: matrix.package_type == 'deb'
         run: |
           apt-get update
-          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg dpkg-sig
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg
 
       - name: Install dependencies (Fedora/Rocky)
         if: matrix.package_type == 'rpm'
@@ -215,10 +215,7 @@ jobs:
           DEB_FILE="linux-guardian_${VERSION}_${{ matrix.distro }}-${{ matrix.version }}_${ARCH}.deb"
           mv "${PKG_NAME}.deb" "$DEB_FILE"
 
-          if [ "$GPG_AVAILABLE" = "true" ]; then
-            dpkg-sig --sign builder "$DEB_FILE"
-            echo "Package signed with GPG"
-          fi
+          echo "Deb package built: $DEB_FILE (signing via repository Release file)"
 
       - name: Build RPM package
         if: matrix.package_type == 'rpm'
