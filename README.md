@@ -14,17 +14,41 @@ Detects active threats on your Linux system in 10-30 seconds. Built in Rust with
 - **Privilege Escalation**: Suspicious SUID binaries, dangerous capabilities, backdoors
 - **System Weaknesses**: Firewall disabled, weak configs, missing updates
 
+## Install
+
+### Debian / Ubuntu
+
+```bash
+curl -fsSL https://brammittendorff.github.io/linux-guardian/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/linux-guardian.gpg
+echo "deb [signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb stable main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+sudo apt update && sudo apt install linux-guardian
+```
+
+### Fedora / RHEL / Rocky Linux
+
+```bash
+sudo dnf config-manager addrepo --from-repofile=https://brammittendorff.github.io/linux-guardian/rpm/linux-guardian.repo
+sudo dnf install linux-guardian
+```
+
+### From source
+
+```bash
+git clone https://github.com/brammittendorff/linux-guardian.git
+cd linux-guardian
+cargo build --release
+sudo cp target/release/linux-guardian /usr/local/bin/
+```
+
 ## Quick Start
 
 ```bash
-# Clone and install (handles Rust installation, builds, installs to /usr/local/bin)
-git clone https://github.com/brammittendorff/linux-guardian.git
-cd linux-guardian
-./install.sh
+# First-time setup (interactive - choose which databases to download)
+linux-guardian setup
 
-# Run a scan (works without root!)
-linux-guardian                   # Fast scan (10-30s)
-sudo linux-guardian --mode deep  # Complete scan with all checks
+# Scan
+linux-guardian                # Fast scan (10-30s)
+sudo linux-guardian --deep    # Full scan with all checks
 ```
 
 ## Why Use This?
@@ -37,32 +61,20 @@ sudo linux-guardian --mode deep  # Complete scan with all checks
 | 100% local | Often cloud-based |
 | 1,400+ actively exploited CVEs | Generic CVE lists |
 
-## Usage Examples
+## Usage
 
 ```bash
-# Quick scan (no root needed)
-linux-guardian
+linux-guardian                    # Fast scan
+sudo linux-guardian --deep        # Full scan (all checks)
+linux-guardian update             # Update databases
+linux-guardian stats              # Show database info
 
-# Full scan with root
-sudo linux-guardian
-
-# Only show problems
-linux-guardian --quiet
-
-# Only show active threats
-linux-guardian --threats-only
-
-# Check specific category
-linux-guardian --category malware
-
-# Different scan depths
-linux-guardian                        # Fast (10-30s, default)
-linux-guardian --mode comprehensive   # Thorough (1-3min)
-sudo linux-guardian --mode deep       # Complete (5-15min)
-
-# Output formats
-linux-guardian --output json
-linux-guardian --output summary
+# Filters
+linux-guardian -t                 # Threats only
+linux-guardian -s high            # Minimum severity
+linux-guardian -c malware         # Category filter
+linux-guardian -j                 # JSON output
+linux-guardian -q                 # Quiet (findings only)
 ```
 
 ## Detection Capabilities
@@ -78,29 +90,14 @@ linux-guardian --output summary
 
 ## CVE & Malware Databases
 
-### CVE Database (1,400+ actively exploited)
 ```bash
-linux-guardian --update-cve-db     # Update CVE database
-linux-guardian --cve-db-stats      # Show database info
+linux-guardian update    # Download/update CVE + malware hash databases
+linux-guardian stats     # Show database info
 ```
 
-### Malware Hash Database (4M+ hashes)
+Automate with cron:
 ```bash
-linux-guardian --update-malware-db    # Update malware hashes
-linux-guardian --malware-db-stats     # Show database info
-```
-
-## Advanced Options
-
-```bash
-# Filter by severity
-linux-guardian --min-severity high
-
-# Automation & CI/CD
-linux-guardian --output json --quiet > scan.json
-
-# Privilege information
-linux-guardian --show-privilege-info
+0 3 * * 0 /usr/local/bin/linux-guardian update
 ```
 
 ## Privilege Separation
@@ -167,7 +164,7 @@ PRs welcome! Especially for: New CVE checks, better cryptominer detection, conta
 
 ## License
 
-MIT OR Apache-2.0
+MIT
 
 ## Legal
 
@@ -175,8 +172,8 @@ MIT OR Apache-2.0
 
 ## Documentation
 
-- [CVE Database Documentation](docs/CVE_DATABASE.md)
-- [Verification Guide](docs/VERIFICATION_GUIDE.md)
+- [Development Guide](docs/DEVELOPMENT.md)
+- [Contributing](docs/CONTRIBUTING.md)
 - [GitHub Issues](https://github.com/brammittendorff/linux-guardian/issues)
 
 ---

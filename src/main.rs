@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::time::Instant;
 use tracing::{info, Level};
@@ -13,101 +13,65 @@ use linux_guardian::utils::privilege::{
 
 #[derive(Parser, Debug)]
 #[command(name = "linux-guardian")]
-#[command(author = "Linux Guardian Contributors")]
-#[command(version = "0.1.0")]
-#[command(about = "Comprehensive Linux security scanner for detecting rootkits, malware, and active attacks", long_about = None)]
+#[command(version)]
+#[command(about = "Fast Linux security scanner", long_about = None)]
 struct Args {
-    /// Scan mode: fast (10-30s), comprehensive (1-3min), deep (5-15min)
-    #[arg(short, long, value_enum, default_value = "fast")]
-    mode: ScanMode,
+    #[command(subcommand)]
+    command: Option<Command>,
 
-    /// Category filter: all, malware, hardening, privacy, compliance, development, network
+    /// Deep scan (all checks, slower)
+    #[arg(short, long)]
+    deep: bool,
+
+    /// JSON output
+    #[arg(short, long)]
+    json: bool,
+
+    /// Only show active threats
+    #[arg(short, long)]
+    threats_only: bool,
+
+    /// Minimum severity: low, medium, high, critical
+    #[arg(short, long)]
+    severity: Option<String>,
+
+    /// Filter by category: malware, hardening, network, etc.
     #[arg(short, long, value_enum)]
     category: Option<ScanCategory>,
 
-    /// Output style: terminal, json, simple, summary
-    #[arg(short, long, value_enum, default_value = "terminal")]
-    output: OutputStyle,
-
-    /// Minimum severity to show: low, medium, high, critical
-    #[arg(long)]
-    min_severity: Option<String>,
-
-    /// Only show active threats (not hardening suggestions)
-    #[arg(long)]
-    threats_only: bool,
-
-    /// Show security score
-    #[arg(long)]
-    score: bool,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-
-    /// Only show findings (suppress info messages)
+    /// Quiet mode (findings only)
     #[arg(short, long)]
     quiet: bool,
 
-    /// Skip privilege checks (some detectors will be disabled)
-    #[arg(long)]
-    skip_privilege_check: bool,
+    /// Verbose logging
+    #[arg(short, long)]
+    verbose: bool,
 
-    /// Update CVE database (downloads CISA KEV + NVD feeds to SQLite)
-    #[arg(long)]
-    update_cve_db: bool,
-
-    /// Show CVE database statistics
-    #[arg(long)]
-    cve_db_stats: bool,
-
-    /// Hide CVE database findings (show only system issues and verified CVEs)
-    #[arg(long)]
-    no_cve_db: bool,
-
-    /// Update malware hash database (downloads MalwareBazaar hashes)
-    #[arg(long)]
-    update_malware_db: bool,
-
-    /// Show malware hash database statistics
-    #[arg(long)]
-    malware_db_stats: bool,
-
-    /// Skip malware hash database checks
-    #[arg(long)]
-    no_malware_db: bool,
-
-    /// Deep malware scan: scan ALL files (disables filtering, much slower)
-    #[arg(long)]
-    deep_malware_scan: bool,
-
-    /// Show detailed privilege requirements for all detectors
-    #[arg(long)]
-    show_privilege_info: bool,
-
-    /// Treat system as a mail server (suppress mail-related warnings)
-    #[arg(long)]
-    mail_server: bool,
-
-    /// Treat system as a web server (suppress web-related warnings)
-    #[arg(long)]
-    web_server: bool,
-
-    /// Treat system as a database server
-    #[arg(long)]
-    database_server: bool,
-
-    /// Auto-detect server type (enabled by default)
-    #[arg(long, default_value = "true")]
-    auto_detect: bool,
-
-    /// Path to suppression config file
+    /// Path to suppression config
     #[arg(long)]
     config: Option<String>,
 
-    /// Generate example suppression config file
+    /// Skip malware hash checks
     #[arg(long)]
-    generate_config: bool,
+    no_malware: bool,
+
+    /// Skip CVE database checks
+    #[arg(long)]
+    no_cve: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// First-time setup: download all databases and verify system
+    Setup,
+    /// Update all databases (CVE + malware hashes)
+    Update,
+    /// Show database statistics
+    Stats,
+    /// Generate example suppression config
+    Config,
+    /// Show privilege requirements for all detectors
+    Privileges,
 }
 
 #[tokio::main]
@@ -128,181 +92,185 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    // Handle config generation
-    if args.generate_config {
-        println!(
-            "{}",
-            linux_guardian::server_context::SuppressionConfig::example_toml()
-        );
-        return Ok(());
-    }
-
-    // Handle privilege info display
-    if args.show_privilege_info {
-        print_privilege_info_table();
-        return Ok(());
-    }
-
-    // Handle malware hash database operations
-    if args.update_malware_db {
-        if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
-            eprintln!("❌ Malware hash database update failed: {}", e);
-            std::process::exit(1);
+    // Handle subcommands
+    match args.command {
+        Some(Command::Setup) => {
+            return run_setup().await;
         }
-        return Ok(());
-    }
-
-    if args.malware_db_stats {
-        if let Err(e) = detectors::malware_hash_db::show_malware_db_stats().await {
-            eprintln!("❌ Failed to show malware database stats: {}", e);
-            std::process::exit(1);
+        Some(Command::Update) => {
+            println!("Updating all databases...\n");
+            if let Err(e) = linux_guardian::cve_db::update_database().await {
+                eprintln!("CVE database update failed: {}", e);
+                std::process::exit(1);
+            }
+            println!("CVE database updated.\n");
+            if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
+                eprintln!("Malware hash database update failed: {}", e);
+                std::process::exit(1);
+            }
+            println!("\nAll databases updated.");
+            return Ok(());
         }
-        return Ok(());
-    }
-
-    // Handle CVE database operations
-    if args.update_cve_db {
-        if let Err(e) = linux_guardian::cve_db::update_database().await {
-            eprintln!("❌ CVE database update failed: {}", e);
-            std::process::exit(1);
-        }
-        println!("✅ CVE database updated successfully!");
-        return Ok(());
-    }
-
-    if args.cve_db_stats {
-        match linux_guardian::cve_db::get_database_stats() {
-            Ok(stats) => {
-                println!("📊 CVE Database Statistics:");
-                println!("   Total CVEs: {}", stats.total_cves);
-                println!("   Critical (CVSS >= 9.0): {}", stats.critical_cves);
-                println!("   Actively Exploited: {}", stats.actively_exploited);
-                if let Some(last_update) = stats.last_update {
-                    println!("   Last Updated: {}", last_update);
-                } else {
-                    println!("   Last Updated: Never (run --update-cve-db)");
+        Some(Command::Stats) => {
+            match linux_guardian::cve_db::get_database_stats() {
+                Ok(stats) => {
+                    println!("CVE Database:");
+                    println!("  Total CVEs: {}", stats.total_cves);
+                    println!("  Critical (CVSS >= 9.0): {}", stats.critical_cves);
+                    println!("  Actively Exploited: {}", stats.actively_exploited);
+                    if let Some(last_update) = stats.last_update {
+                        println!("  Last Updated: {}", last_update);
+                    } else {
+                        println!("  Last Updated: Never (run: linux-guardian update)");
+                    }
                 }
-                println!("\n   Database: /var/cache/linux-guardian/cve.db");
+                Err(e) => {
+                    eprintln!("No CVE database: {} (run: linux-guardian update)", e);
+                }
             }
-            Err(e) => {
-                eprintln!("❌ Failed to get database stats: {}", e);
-                eprintln!("   Run --update-cve-db to initialize database");
+            println!();
+            if let Err(e) = detectors::malware_hash_db::show_malware_db_stats().await {
+                eprintln!("No malware database: {} (run: linux-guardian update)", e);
             }
+            return Ok(());
         }
-        return Ok(());
+        Some(Command::Config) => {
+            println!(
+                "{}",
+                linux_guardian::server_context::SuppressionConfig::example_toml()
+            );
+            return Ok(());
+        }
+        Some(Command::Privileges) => {
+            print_privilege_info_table();
+            return Ok(());
+        }
+        None => {} // Default: run scan
     }
+
+    // Determine scan mode
+    let mode = if args.deep {
+        ScanMode::Deep
+    } else {
+        ScanMode::Fast
+    };
+
+    // Determine output style
+    let output_style = if args.json {
+        OutputStyle::Json
+    } else {
+        OutputStyle::Terminal
+    };
 
     // Display banner
-    if !args.quiet && args.output == OutputStyle::Terminal {
+    if !args.quiet && output_style == OutputStyle::Terminal {
         print_banner();
     }
 
-    // Check privileges and show detailed information
+    // Check privileges
     let is_root = check_privileges();
-    if !is_root && !args.skip_privilege_check && !args.quiet {
-        print_privilege_warning(&args.mode);
+    if !is_root && !args.quiet && output_style == OutputStyle::Terminal {
+        print_privilege_warning(&mode);
     }
 
-    // Build server context
-    let mut server_context = if args.auto_detect {
-        linux_guardian::server_context::ServerContext::detect()
-    } else {
-        linux_guardian::server_context::ServerContext::default()
-    };
-
-    // Override with manual flags
-    if args.mail_server {
-        server_context.is_mail_server = true;
-    }
-    if args.web_server {
-        server_context.is_web_server = true;
-    }
-    if args.database_server {
-        server_context.is_database_server = true;
-    }
+    // Build server context (always auto-detect)
+    let server_context = linux_guardian::server_context::ServerContext::detect();
 
     // Load suppression config
     let mut suppression_config = if let Some(ref config_path) = args.config {
         linux_guardian::server_context::SuppressionConfig::load(std::path::Path::new(config_path))
             .unwrap_or_else(|e| {
-                eprintln!("⚠️  Failed to load config from {}: {}", config_path, e);
+                eprintln!("Failed to load config {}: {}", config_path, e);
                 linux_guardian::server_context::SuppressionConfig::default()
             })
     } else {
         linux_guardian::server_context::SuppressionConfig::load_default()
     };
 
-    // Merge server context with suppressions
     suppression_config.merge_with_context(&server_context);
 
-    // Show detected context if not quiet
+    // Show detected context
     if !args.quiet
-        && args.output == OutputStyle::Terminal
+        && output_style == OutputStyle::Terminal
         && !server_context.detected_services.is_empty()
     {
         println!(
-            "🔍 Detected server type: {}",
-            server_context.detected_services.join(", ")
-        );
-        println!(
-            "   {} ports and {} services whitelisted",
+            "Detected: {} ({}p/{}s whitelisted)\n",
+            server_context.detected_services.join(", "),
             suppression_config.ignore_ports.len(),
             suppression_config.allow_root_services.len()
         );
-        println!();
     }
 
-    info!("Starting security scan in {:?} mode", args.mode);
+    // Show tips about missing databases
+    if !args.quiet && output_style == OutputStyle::Terminal {
+        if !cve_database_exists() {
+            println!(
+                "{}",
+                "Tip: No CVE database. Run 'linux-guardian update' for vulnerability detection."
+                    .yellow()
+            );
+            println!();
+        }
+        if !malware_database_exists() {
+            println!(
+                "{}",
+                "Tip: No malware database. Run 'linux-guardian update' for malware hash detection."
+                    .yellow()
+            );
+            println!();
+        }
+    }
+
+    info!("Starting security scan in {:?} mode", mode);
     let start = Instant::now();
 
     // Run the scan
-    let findings = run_scan(&args, is_root, &server_context, &suppression_config).await?;
+    let findings = run_scan(&args, mode, is_root, &server_context, &suppression_config).await?;
 
     let duration = start.elapsed();
 
     // Apply filters
     let mut filtered_findings = findings;
 
-    // Filter by CVE database option
-    if args.no_cve_db {
+    if args.no_cve {
         filtered_findings
             .retain(|f| f.category != "cve_database" && f.category != "cve_knowledge_base");
     }
 
-    // Filter by malware hash database option
-    if args.no_malware_db {
+    if args.no_malware {
         filtered_findings.retain(|f| f.category != "malware_hash_match");
     }
 
-    // Filter by category
     if let Some(category) = args.category {
         filtered_findings.retain(|f| f.matches_category(category));
     }
 
-    // Filter by severity
-    if let Some(ref min_sev) = args.min_severity {
+    if let Some(ref min_sev) = args.severity {
         filtered_findings.retain(|f| f.matches_severity(min_sev));
     }
 
-    // Filter threats only
     if args.threats_only {
         filtered_findings.retain(|f| f.is_threat());
     }
 
     // Output results
-    output::print_findings(
-        &filtered_findings,
-        args.output,
-        args.score,
-        args.output == OutputStyle::Summary,
-    );
+    output::print_findings(&filtered_findings, output_style, false, false);
 
     if !args.quiet {
         println!(
-            "\n  ⏱️  Scan completed in {:.2}s ({:?} mode)",
+            "\n  Scan completed in {:.2}s ({:?} mode)",
             duration.as_secs_f32(),
-            args.mode
+            mode
         );
+
+        if output_style == OutputStyle::Terminal && matches!(mode, ScanMode::Fast) {
+            println!(
+                "  {}",
+                "Tip: linux-guardian --deep for thorough scan | linux-guardian update for vulnerability data"
+                    .dimmed()
+            );
+        }
     }
 
     // Exit with appropriate code
@@ -319,6 +287,7 @@ async fn main() -> Result<()> {
 
 async fn run_scan(
     args: &Args,
+    mode: ScanMode,
     is_root: bool,
     server_context: &linux_guardian::server_context::ServerContext,
     suppression_config: &linux_guardian::server_context::SuppressionConfig,
@@ -332,11 +301,10 @@ async fn run_scan(
 
     let mut findings = Vec::new();
 
-    match args.mode {
+    match mode {
         ScanMode::Fast => {
-            info!("Running fast scan (9 critical checks + malware hash check in high-risk locations)...\n");
+            info!("Running fast scan...\n");
 
-            // Run all fast checks in parallel
             let mut handles = vec![
                 tokio::spawn(cve_knowledge_base::check_cve_knowledge_base()),
                 tokio::spawn(cve_database::check_known_exploited_vulnerabilities()),
@@ -349,29 +317,25 @@ async fn run_scan(
                 tokio::spawn(network::analyze_traffic_patterns()),
             ];
 
-            // Add fast malware hash check (only /tmp, /var/tmp, /dev/shm)
-            if !args.no_malware_db {
-                let deep_scan = args.deep_malware_scan;
+            if !args.no_malware {
                 handles.push(tokio::spawn(async move {
-                    detectors::malware_hash_db::check_malware_hashes_fast(deep_scan).await
+                    detectors::malware_hash_db::check_malware_hashes_fast(false).await
                 }));
             }
 
-            // Collect results
             for handle in handles {
                 if let Ok(Ok(mut detector_findings)) = handle.await {
                     findings.append(&mut detector_findings);
                 }
             }
         }
-        ScanMode::Comprehensive => {
-            info!("Running comprehensive scan (all security checks + expanded malware hash scan)...\n");
+        ScanMode::Comprehensive | ScanMode::Deep => {
+            info!("Running deep scan...\n");
 
-            // Run all fast checks
+            // Fast checks first
             findings.extend(run_fast_checks(is_root).await?);
 
-            // Add comprehensive-only checks
-            let mut comp_handles = vec![
+            let mut handles = vec![
                 tokio::spawn(cve_database_sqlite::check_cve_database()),
                 tokio::spawn(firewall::check_firewall()),
                 tokio::spawn(updates::check_security_updates()),
@@ -380,74 +344,36 @@ async fn run_scan(
                 tokio::spawn(disk_encryption::check_disk_encryption()),
                 tokio::spawn(bootloader::check_bootloader_security()),
                 tokio::spawn(file_permissions::check_file_permissions()),
-                tokio::spawn(credential_theft::detect_credential_theft()), // Cookie/password theft
-                tokio::spawn(credential_theft::check_credential_permissions()), // SSH key permissions
-                tokio::spawn(credential_theft::scan_exposed_credentials()), // API keys in configs
-                tokio::spawn(container_security::check_container_security()), // Docker security
+                tokio::spawn(credential_theft::detect_credential_theft()),
+                tokio::spawn(credential_theft::check_credential_permissions()),
+                tokio::spawn(credential_theft::scan_exposed_credentials()),
+                tokio::spawn(container_security::check_container_security()),
+                tokio::spawn(package_integrity::verify_package_integrity()),
+                tokio::spawn(binary_validation::validate_critical_binaries()),
+                tokio::spawn(malware_hashes::scan_malware_hashes()),
+                tokio::spawn(malware_hashes::scan_elf_anomalies()),
+                tokio::spawn(detectors::ebpf::detect_ebpf_programs()),
+                tokio::spawn(detectors::ebpf::detect_ebpf_maps()),
+                tokio::spawn(detectors::kernel_modules::detect_kernel_modules()),
+                tokio::spawn(detectors::kernel_modules::check_module_parameters()),
+                tokio::spawn(detectors::systemd_security::detect_systemd_tampering()),
+                tokio::spawn(detectors::systemd_security::check_systemd_timers()),
+                tokio::spawn(detectors::systemd_security::check_init_scripts()),
+                tokio::spawn(detectors::cron_backdoor::detect_cron_backdoors()),
+                tokio::spawn(detectors::cron_backdoor::check_at_jobs()),
+                tokio::spawn(detectors::process_capabilities::detect_dangerous_capabilities()),
+                tokio::spawn(detectors::process_capabilities::check_file_capabilities()),
+                tokio::spawn(detectors::memory_security::detect_memory_injection()),
+                tokio::spawn(detectors::memory_security::check_core_dumps()),
             ];
 
-            // Add comprehensive malware hash check (user dirs + web apps)
-            if !args.no_malware_db {
-                let deep_scan = args.deep_malware_scan;
-                comp_handles.push(tokio::spawn(async move {
-                    detectors::malware_hash_db::check_malware_hashes_comprehensive(deep_scan).await
+            if !args.no_malware {
+                handles.push(tokio::spawn(async move {
+                    detectors::malware_hash_db::check_malware_hashes(false).await
                 }));
             }
 
-            for handle in comp_handles {
-                if let Ok(Ok(mut detector_findings)) = handle.await {
-                    findings.append(&mut detector_findings);
-                }
-            }
-        }
-        ScanMode::Deep => {
-            info!("Running deep scan (comprehensive + package integrity)...\n");
-
-            // Run comprehensive checks
-            findings.extend(run_fast_checks(is_root).await?);
-
-            let mut comp_handles = vec![
-                tokio::spawn(cve_database_sqlite::check_cve_database()),
-                tokio::spawn(firewall::check_firewall()),
-                tokio::spawn(updates::check_security_updates()),
-                tokio::spawn(mandatory_access_control::check_mandatory_access_control()),
-                tokio::spawn(kernel_hardening::check_kernel_hardening()),
-                tokio::spawn(disk_encryption::check_disk_encryption()),
-                tokio::spawn(bootloader::check_bootloader_security()),
-                tokio::spawn(file_permissions::check_file_permissions()),
-                tokio::spawn(credential_theft::detect_credential_theft()), // Cookie/password theft
-                tokio::spawn(credential_theft::check_credential_permissions()), // SSH key permissions
-                tokio::spawn(credential_theft::scan_exposed_credentials()), // API keys in configs
-                tokio::spawn(container_security::check_container_security()), // Docker security
-                tokio::spawn(package_integrity::verify_package_integrity()), // Deep only (slow!)
-                tokio::spawn(binary_validation::validate_critical_binaries()), // Binary verification
-                tokio::spawn(malware_hashes::scan_malware_hashes()), // Hash-based malware detection
-                tokio::spawn(malware_hashes::scan_elf_anomalies()),  // ELF binary analysis
-                // NEW: Advanced rootkit & exploit detection
-                tokio::spawn(detectors::ebpf::detect_ebpf_programs()), // eBPF rootkits
-                tokio::spawn(detectors::ebpf::detect_ebpf_maps()),     // eBPF data exfiltration
-                tokio::spawn(detectors::kernel_modules::detect_kernel_modules()), // Kernel rootkits
-                tokio::spawn(detectors::kernel_modules::check_module_parameters()), // Module tampering
-                tokio::spawn(detectors::systemd_security::detect_systemd_tampering()), // Systemd backdoors
-                tokio::spawn(detectors::systemd_security::check_systemd_timers()), // Persistence
-                tokio::spawn(detectors::systemd_security::check_init_scripts()),   // Legacy init
-                tokio::spawn(detectors::cron_backdoor::detect_cron_backdoors()), // Cron persistence
-                tokio::spawn(detectors::cron_backdoor::check_at_jobs()),         // At jobs
-                tokio::spawn(detectors::process_capabilities::detect_dangerous_capabilities()), // CAP_SYS_ADMIN
-                tokio::spawn(detectors::process_capabilities::check_file_capabilities()), // SUID alternatives
-                tokio::spawn(detectors::memory_security::detect_memory_injection()), // Code injection
-                tokio::spawn(detectors::memory_security::check_core_dumps()), // Exploitation evidence
-            ];
-
-            // Add malware hash database check (slow, only in deep mode)
-            if !args.no_malware_db {
-                let deep_scan = args.deep_malware_scan;
-                comp_handles.push(tokio::spawn(async move {
-                    detectors::malware_hash_db::check_malware_hashes(deep_scan).await
-                }));
-            }
-
-            for handle in comp_handles {
+            for handle in handles {
                 if let Ok(Ok(mut detector_findings)) = handle.await {
                     findings.append(&mut detector_findings);
                 }
@@ -466,8 +392,8 @@ async fn run_fast_checks(is_root: bool) -> Result<Vec<linux_guardian::models::Fi
     let mut findings = Vec::new();
 
     let handles = vec![
-        tokio::spawn(detectors::cve_knowledge_base::check_cve_knowledge_base()), // Comprehensive CVE checking
-        tokio::spawn(detectors::cve_database::check_known_exploited_vulnerabilities()), // CISA KEV
+        tokio::spawn(detectors::cve_knowledge_base::check_cve_knowledge_base()),
+        tokio::spawn(detectors::cve_database::check_known_exploited_vulnerabilities()),
         tokio::spawn(detectors::privilege_escalation::scan_suid_binaries(is_root)),
         tokio::spawn(detectors::cryptominer::detect_cpu_anomalies()),
         tokio::spawn(detectors::ssh::check_unauthorized_keys()),
@@ -486,6 +412,116 @@ async fn run_fast_checks(is_root: bool) -> Result<Vec<linux_guardian::models::Fi
     Ok(findings)
 }
 
+fn prompt_yn(question: &str, default_yes: bool) -> bool {
+    use std::io::{self, Write};
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("{} {} ", question, hint);
+    io::stdout().flush().unwrap();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    let input = input.trim().to_lowercase();
+    if input.is_empty() {
+        return default_yes;
+    }
+    input.starts_with('y')
+}
+
+async fn run_setup() -> Result<()> {
+    println!(
+        "{}",
+        "Linux Guardian - Setup\n".bold().bright_cyan()
+    );
+
+    // 1. Check databases
+    let has_cve = cve_database_exists();
+    let has_malware = malware_database_exists();
+
+    if has_cve && has_malware {
+        println!("{}", "Databases already downloaded.".green());
+    } else {
+        if !has_cve {
+            println!("CVE database: {}", "not found".yellow());
+        } else {
+            println!("CVE database: {}", "ok".green());
+        }
+        if !has_malware {
+            println!("Malware hash database: {}", "not found".yellow());
+        } else {
+            println!("Malware hash database: {}", "ok".green());
+        }
+        println!();
+    }
+
+    // 2. Download CVE database
+    if !has_cve {
+        if prompt_yn("Download CVE database? (~50MB, CISA KEV + NVD)", true) {
+            println!();
+            if let Err(e) = linux_guardian::cve_db::update_database().await {
+                eprintln!("{}", format!("CVE database failed: {}", e).red());
+            } else {
+                println!("{}", "CVE database ready.".green());
+            }
+            println!();
+        }
+    }
+
+    // 3. Download malware hash database
+    if !has_malware {
+        if prompt_yn("Download malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)", true) {
+            println!();
+            if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
+                eprintln!("{}", format!("Malware database failed: {}", e).red());
+            } else {
+                println!("{}", "Malware hash database ready.".green());
+            }
+            println!();
+        }
+    }
+
+    // 4. Show privilege info
+    let is_root = check_privileges();
+    println!();
+    if is_root {
+        println!("Running as: {}", "root (full access)".green());
+    } else {
+        println!("Running as: {}", "non-root (limited)".yellow());
+        println!("  Most checks work fine without root.");
+        println!("  Run with sudo for complete coverage.");
+    }
+
+    // 5. Offer to run first scan
+    println!();
+    if prompt_yn("Run a quick scan now?", true) {
+        println!();
+        // Re-parse with no args to run default scan
+        let scan_args = Args::parse_from(["linux-guardian"]);
+        let server_context = linux_guardian::server_context::ServerContext::detect();
+        let mut suppression_config =
+            linux_guardian::server_context::SuppressionConfig::load_default();
+        suppression_config.merge_with_context(&server_context);
+
+        print_banner();
+        let start = Instant::now();
+        let findings =
+            run_scan(&scan_args, ScanMode::Fast, is_root, &server_context, &suppression_config)
+                .await?;
+        let duration = start.elapsed();
+
+        output::print_findings(&findings, OutputStyle::Terminal, false, false);
+        println!(
+            "\n  Scan completed in {:.2}s",
+            duration.as_secs_f32()
+        );
+    }
+
+    println!("\n{}", "Setup complete!".green().bold());
+    println!("  linux-guardian          # fast scan");
+    println!("  linux-guardian --deep   # full scan");
+    println!("  linux-guardian update   # update databases");
+
+    Ok(())
+}
+
 fn print_banner() {
     println!(
         "{}",
@@ -497,162 +533,78 @@ fn print_banner() {
     );
     println!(
         "{}",
-        "║              Real-time Threat Detection 2025              ║".bright_cyan()
-    );
-    println!(
-        "{}",
         "╚═══════════════════════════════════════════════════════════╝".bright_cyan()
     );
     println!();
 }
 
-// Helper functions
-
 fn print_privilege_warning(mode: &ScanMode) {
     let (no_root, partial_root, requires_root) = group_detectors_by_privilege();
 
-    println!("{}", "⚠️  Running without root privileges".yellow().bold());
-    println!();
-
-    println!("{}", "✅ FULL FUNCTIONALITY (no root needed):".green());
+    println!("{}", "Running without root privileges".yellow().bold());
     println!(
-        "   {} detectors will run with complete features",
-        no_root.len()
-    );
-    println!("   • CVE database checks");
-    println!("   • Network connection analysis");
-    println!("   • Kernel hardening checks");
-    println!("   • Disk encryption detection");
-    println!();
-
-    println!(
-        "{}",
-        "⚠️  PARTIAL FUNCTIONALITY (limited without root):".yellow()
-    );
-    println!(
-        "   {} detectors will run with reduced features",
-        partial_root.len()
-    );
-    println!("   • SSH: config analysis only (no auth log analysis)");
-    println!("   • Firewall: basic status (no full ruleset)");
-    println!("   • Process: own processes only (not all users)");
-    println!("   • Container: basic checks (limited Docker access)");
-    println!();
-
-    println!("{}", "❌ DISABLED (requires root):".red());
-    println!(
-        "   {} detector(s) will be completely skipped",
+        "  {} full, {} partial, {} disabled",
+        no_root.len(),
+        partial_root.len(),
         requires_root.len()
     );
-    println!("   • Privilege Escalation: SUID/capability scanning");
-    println!();
 
     match mode {
         ScanMode::Fast => {
-            println!(
-                "{}",
-                "📝 Note: Fast mode uses mostly non-privileged checks".cyan()
-            );
+            println!("{}", "  Fast mode uses mostly non-privileged checks".dimmed());
         }
-        ScanMode::Comprehensive | ScanMode::Deep => {
+        _ => {
             println!(
                 "{}",
-                "📝 Note: Run with sudo for complete system analysis in this mode".cyan()
+                "  Run with sudo for complete analysis".dimmed()
             );
         }
     }
 
     println!(
-        "   Run {} for detailed breakdown",
-        "--show-privilege-info".bright_cyan()
+        "  Run {} for details",
+        "linux-guardian privileges".bright_cyan()
     );
     println!();
 }
 
 fn print_privilege_info_table() {
-    println!(
-        "{}",
-        "🔐 Detector Privilege Requirements".bold().bright_cyan()
-    );
-    println!();
-
     let (no_root, partial_root, requires_root) = group_detectors_by_privilege();
 
-    // NO ROOT REQUIRED
-    println!("{}", "✅ NO ROOT REQUIRED".green().bold());
     println!(
         "{}",
-        "   These detectors work fully without root privileges:".green()
+        "Detector Privilege Requirements\n".bold().bright_cyan()
     );
-    println!();
+
+    println!("{}", "NO ROOT REQUIRED:".green().bold());
     for detector in &no_root {
-        let info = get_detector_privilege_info(detector);
-        println!("   • {}", format!("{:30}", detector).bright_white());
-        if !info.works_without_root.is_empty() {
-            for feature in info.works_without_root {
-                println!("     {}", format!("✓ {}", feature).dimmed());
-            }
-        }
+        println!("  {}", detector);
     }
     println!();
 
-    // PARTIAL ROOT
-    println!("{}", "⚠️  PARTIAL ROOT ACCESS".yellow().bold());
-    println!(
-        "{}",
-        "   These detectors work partially without root:".yellow()
-    );
-    println!();
+    println!("{}", "PARTIAL (limited without root):".yellow().bold());
     for detector in &partial_root {
         let info = get_detector_privilege_info(detector);
-        println!("   • {}", format!("{:30}", detector).bright_white().bold());
-
-        if !info.works_without_root.is_empty() {
-            println!("     {} (without root):", "Available".green());
-            for feature in info.works_without_root {
-                println!("       {}", format!("✓ {}", feature).green());
-            }
+        println!("  {}", format!("{:30}", detector).bold());
+        for feature in info.works_without_root {
+            println!("    {}", format!("+ {}", feature).green());
         }
-
-        if !info.requires_root_for.is_empty() {
-            println!("     {} (requires root):", "Limited".yellow());
-            for feature in info.requires_root_for {
-                println!("       {}", format!("⚠ {}", feature).yellow());
-            }
+        for feature in info.requires_root_for {
+            println!("    {}", format!("- {}", feature).yellow());
         }
-        println!();
     }
-
-    // REQUIRES ROOT
-    println!("{}", "❌ ROOT REQUIRED".red().bold());
-    println!("{}", "   These detectors require root privileges:".red());
     println!();
+
+    println!("{}", "ROOT REQUIRED:".red().bold());
     for detector in &requires_root {
         let info = get_detector_privilege_info(detector);
-        println!("   • {}", format!("{:30}", detector).bright_white().bold());
         for reason in info.requires_root_for {
-            println!("     {}", format!("✗ {}", reason).red());
+            println!("  {} - {}", detector, reason);
         }
     }
-    println!();
-
-    println!("{}", "💡 RECOMMENDATIONS:".cyan().bold());
-    println!("   • For desktop users: Most checks work without root");
-    println!("   • For servers: Run with sudo for complete coverage");
-    println!("   • For security audits: Root access is recommended");
-    println!();
-    println!(
-        "   Run: {} for non-root scan",
-        "linux-guardian --mode fast".bright_cyan()
-    );
-    println!(
-        "   Run: {} for complete scan",
-        "sudo linux-guardian --mode comprehensive".bright_cyan()
-    );
     println!();
 }
 
-/// Apply context-aware suppressions to findings
 fn apply_suppressions(
     findings: Vec<linux_guardian::models::Finding>,
     _server_context: &linux_guardian::server_context::ServerContext,
@@ -670,7 +622,6 @@ fn apply_suppressions(
 
             // Suppress network exposure for expected ports
             if finding.category == "network_exposure" {
-                // Extract port from description (e.g., "Port 25 is listening...")
                 if let Some(port_str) = finding.description.split_whitespace().nth(1) {
                     if let Ok(port) = port_str.parse::<u16>() {
                         if suppression_config.ignore_ports.contains(&port) {
@@ -716,11 +667,10 @@ fn apply_suppressions(
                 }
             }
 
-            // Suppress systemd backdoor warnings for known good services (clamav)
+            // Suppress ClamAV on-access scanner (legitimate bash -c usage)
             if finding.category == "systemd_backdoor"
                 && finding.description.contains("clamav-clamonacc")
             {
-                // ClamAV on-access scanner legitimately uses bash -c
                 return false;
             }
 
@@ -729,15 +679,13 @@ fn apply_suppressions(
         .collect()
 }
 
-/// Adjust finding severities based on context
-/// For example, disk encryption is CRITICAL for laptops but MEDIUM for datacenter servers
 fn adjust_finding_severities(
     mut findings: Vec<linux_guardian::models::Finding>,
     server_context: &linux_guardian::server_context::ServerContext,
     _suppression_config: &linux_guardian::server_context::SuppressionConfig,
 ) -> Vec<linux_guardian::models::Finding> {
     for finding in &mut findings {
-        // Disk encryption less critical for servers (physical security assumed)
+        // Disk encryption less critical for servers
         if finding.category == "encryption"
             && finding.title.contains("Disk Encryption")
             && (server_context.is_mail_server
@@ -748,7 +696,7 @@ fn adjust_finding_severities(
             finding.severity = "medium".to_string();
         }
 
-        // GRUB password less critical on servers in secure datacenters
+        // GRUB password less critical on servers
         if finding.category == "bootloader"
             && finding.title.contains("Password")
             && (server_context.is_mail_server || server_context.is_web_server)
@@ -757,7 +705,7 @@ fn adjust_finding_severities(
             finding.severity = "medium".to_string();
         }
 
-        // Connection count mismatch might be normal with IPv6, containers, etc.
+        // Connection count mismatch might be normal
         if finding.category == "rootkit"
             && finding.title.contains("Connection Count Mismatch")
             && finding.severity == "high"
@@ -767,4 +715,25 @@ fn adjust_finding_severities(
     }
 
     findings
+}
+
+fn cve_database_exists() -> bool {
+    let mut paths = vec![std::path::PathBuf::from("/var/cache/linux-guardian/cve.db")];
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(std::path::PathBuf::from(home).join(".cache/linux-guardian/cve.db"));
+    }
+    paths.iter().any(|p| {
+        p.exists() && std::fs::metadata(p).map(|m| m.len() > 100_000).unwrap_or(false)
+    })
+}
+
+fn malware_database_exists() -> bool {
+    let mut paths =
+        vec![std::path::PathBuf::from("/var/cache/linux-guardian/malware_hashes.csv")];
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(
+            std::path::PathBuf::from(home).join(".cache/linux-guardian/malware_hashes.csv"),
+        );
+    }
+    paths.iter().any(|p| p.exists())
 }

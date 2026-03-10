@@ -7,7 +7,7 @@ pub fn check_privileges() -> bool {
 
 /// Check if we have read access to a file
 pub fn has_read_access(path: &str) -> bool {
-    std::fs::metadata(path).is_ok()
+    std::fs::File::open(path).is_ok()
 }
 
 /// Privilege level required for a detector

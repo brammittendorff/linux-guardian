@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
   id-token: write
   attestations: write
 
@@ -108,7 +109,6 @@ jobs:
         if: matrix.package_type == 'rpm'
         run: |
           if command -v dnf &> /dev/null; then
-            # Update base system first to fix glibc version mismatches
             dnf upgrade -y --refresh || dnf upgrade -y
             dnf install -y gcc gcc-c++ make pkgconfig openssl-devel git bash rpm-build rpmdevtools
           else
@@ -126,13 +126,21 @@ jobs:
         run: |
           apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk
 
-      # Package signing: We DON'T sign in CI/CD for security reasons
-      # Instead we rely on:
-      # 1. SHA256/SHA512 checksums (generated below)
-      # 2. GitHub's attestation/provenance (automatic)
-      # 3. For GPG signing: Sign packages locally on your machine before release
-      - name: Set signing flag
+      - name: Import GPG key
+        if: env.GPG_PRIVATE_KEY != ''
         shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_AVAILABLE=true" >> $GITHUB_ENV
+
+      - name: Set signing flag
+        if: env.GPG_PRIVATE_KEY == ''
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           echo "GPG_AVAILABLE=false" >> $GITHUB_ENV
 
@@ -156,6 +164,13 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
+      - name: Set version in Cargo.toml
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          echo "Set Cargo.toml version to: $VERSION"
+
       - name: Build release binary
         shell: bash
         run: |
@@ -171,21 +186,17 @@ jobs:
           ARCH="${{ matrix.arch }}"
           PKG_NAME="linux-guardian_${VERSION}_${ARCH}"
 
-          # Create package structure
           mkdir -p "$PKG_NAME/DEBIAN"
           mkdir -p "$PKG_NAME/usr/local/bin"
           mkdir -p "$PKG_NAME/usr/share/doc/linux-guardian"
           mkdir -p "$PKG_NAME/var/cache/linux-guardian"
 
-          # Copy binary
           cp target/release/linux-guardian "$PKG_NAME/usr/local/bin/"
           chmod 755 "$PKG_NAME/usr/local/bin/linux-guardian"
 
-          # Copy documentation
           cp README.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
           cp CONTRIBUTING.md "$PKG_NAME/usr/share/doc/linux-guardian/" || true
 
-          # Create control file
           cat > "$PKG_NAME/DEBIAN/control" <<EOF
           Package: linux-guardian
           Version: ${VERSION}
@@ -200,15 +211,13 @@ jobs:
           Homepage: https://github.com/brammittendorff/linux-guardian
           EOF
 
-          # Build package
           dpkg-deb --build "$PKG_NAME"
           DEB_FILE="linux-guardian_${VERSION}_${{ matrix.distro }}-${{ matrix.version }}_${ARCH}.deb"
           mv "${PKG_NAME}.deb" "$DEB_FILE"
 
-          # Sign package if GPG key is available
           if [ "$GPG_AVAILABLE" = "true" ]; then
             dpkg-sig --sign builder "$DEB_FILE"
-            echo "✓ Package signed with GPG"
+            echo "Package signed with GPG"
           fi
 
       - name: Build RPM package
@@ -217,16 +226,14 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # Setup RPM build environment
           mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
-          # Create spec file
           cat > ~/rpmbuild/SPECS/linux-guardian.spec <<EOF
           Name:           linux-guardian
           Version:        ${VERSION}
           Release:        1%{?dist}
           Summary:        Lightning-fast Linux security scanner
-          License:        MIT OR Apache-2.0
+          License:        MIT
           URL:            https://github.com/brammittendorff/linux-guardian
           BuildArch:      ${{ matrix.arch }}
 
@@ -250,30 +257,23 @@ jobs:
           - Automated build for ${{ matrix.name }}
           EOF
 
-          # Setup GPG for RPM signing if available
           if [ "$GPG_AVAILABLE" = "true" ]; then
             GPG_NAME=$(gpg --list-keys --with-colons | grep '^uid' | head -1 | cut -d: -f10)
             cat > ~/.rpmmacros <<MACROS
           %_signature gpg
           %_gpg_name ${GPG_NAME}
+          %__gpg_sign_cmd %{__gpg} gpg --batch --no-verbose --no-armor --passphrase-fd 3 --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           MACROS
-            echo "✓ GPG configured for RPM signing"
           fi
 
-          # Build RPM
           if [ "$GPG_AVAILABLE" = "true" ]; then
             rpmbuild -bb --sign ~/rpmbuild/SPECS/linux-guardian.spec
           else
             rpmbuild -bb ~/rpmbuild/SPECS/linux-guardian.spec
           fi
 
-          # Find and rename the RPM
           RPM_FILE="linux-guardian-${VERSION}-1.${{ matrix.distro }}${{ matrix.version }}.${{ matrix.arch }}.rpm"
           find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} "$RPM_FILE" \;
-
-          if [ "$GPG_AVAILABLE" = "true" ]; then
-            echo "✓ RPM package signed with GPG"
-          fi
 
       - name: Build Arch package
         if: matrix.package_type == 'pkg.tar.zst'
@@ -281,10 +281,8 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # Create a non-root user (makepkg refuses to run as root)
           useradd -m builder
 
-          # Create PKGBUILD
           mkdir -p archpkg
           cat > archpkg/PKGBUILD <<EOF
           # Maintainer: Linux Guardian Contributors <noreply@github.com>
@@ -294,7 +292,7 @@ jobs:
           pkgdesc="Lightning-fast Linux security scanner"
           arch=('x86_64')
           url="https://github.com/brammittendorff/linux-guardian"
-          license=('MIT' 'Apache')
+          license=('MIT')
           depends=()
           options=('!debug' '!strip')
 
@@ -304,14 +302,11 @@ jobs:
           }
           EOF
 
-          # Give builder ownership of everything
           chown -R builder:builder . archpkg
 
-          # Build as non-root user
           cd archpkg
           su builder -c "makepkg --skipinteg --skippgpcheck"
 
-          # Move the main package (not the debug package)
           mv linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst "../linux-guardian-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst"
 
       - name: Build Alpine APK package
@@ -320,25 +315,20 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # Setup abuild directories and config
           mkdir -p ~/packages/main/x86_64
           mkdir -p ~/apkbuild
           mkdir -p ~/.abuild
 
-          # Generate signing keys manually
           openssl genrsa -out ~/.abuild/builder.rsa 2048
           openssl rsa -in ~/.abuild/builder.rsa -pubout -out ~/.abuild/builder.rsa.pub
 
-          # Install the public key
           cp ~/.abuild/builder.rsa.pub /etc/apk/keys/
 
-          # Configure abuild to use our key
           cat > ~/.abuild/abuild.conf <<ABCONF
           PACKAGER="Linux Guardian CI <noreply@github.com>"
           PACKAGER_PRIVKEY="$HOME/.abuild/builder.rsa"
           ABCONF
 
-          # Create APKBUILD
           cat > ~/apkbuild/APKBUILD <<EOF
           # Maintainer: Linux Guardian Contributors <noreply@github.com>
           pkgname=linux-guardian
@@ -347,7 +337,7 @@ jobs:
           pkgdesc="Lightning-fast Linux security scanner"
           url="https://github.com/brammittendorff/linux-guardian"
           arch="x86_64"
-          license="MIT OR Apache-2.0"
+          license="MIT"
           options="!check"
 
           package() {
@@ -373,7 +363,6 @@ jobs:
       - name: Generate checksums
         shell: bash
         run: |
-          # Generate checksums only for files that exist
           shopt -s nullglob
           packages=(*.deb *.rpm *.pkg.tar.zst *.apk)
           if [ ${#packages[@]} -gt 0 ]; then
@@ -407,3 +396,160 @@ jobs:
             SHA512SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-repo:
+    name: Publish package repository
+    needs: build-packages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg createrepo-c
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts/
+          pattern: package-*
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "GPG_PRIVATE_KEY secret not set - repository will not be signed"
+            echo "GPG_AVAILABLE=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_AVAILABLE=true" >> $GITHUB_ENV
+
+          # Export public key for the repository
+          mkdir -p site/
+          gpg --armor --export > site/gpg.key
+          echo "Exported public GPG key to site/gpg.key"
+
+      - name: Build APT repository
+        run: |
+          mkdir -p site/deb/pool/main/l/linux-guardian
+          mkdir -p site/deb/dists/stable/main/binary-amd64
+
+          # Collect all .deb files
+          find artifacts/ -name "*.deb" -exec cp {} site/deb/pool/main/l/linux-guardian/ \;
+
+          DEB_COUNT=$(find site/deb/pool/main/l/linux-guardian -name "*.deb" | wc -l)
+          echo "Found $DEB_COUNT .deb packages"
+
+          if [ "$DEB_COUNT" -eq 0 ]; then
+            echo "No .deb packages found, skipping APT repo"
+            exit 0
+          fi
+
+          # Generate Packages index
+          cd site/deb
+          dpkg-scanpackages --multiversion pool/ > dists/stable/main/binary-amd64/Packages
+          gzip -k dists/stable/main/binary-amd64/Packages
+
+          # Generate Release file
+          cd dists/stable
+          cat > Release <<EOF
+          Origin: linux-guardian
+          Label: Linux Guardian
+          Suite: stable
+          Codename: stable
+          Architectures: amd64
+          Components: main
+          Description: Linux Guardian package repository
+          EOF
+
+          # Add checksums to Release
+          apt-ftparchive release . >> Release
+
+          # Sign Release file
+          cd $GITHUB_WORKSPACE
+          if [ "$GPG_AVAILABLE" = "true" ]; then
+            gpg --batch --yes --armor --detach-sign -o site/deb/dists/stable/Release.gpg site/deb/dists/stable/Release
+            gpg --batch --yes --armor --clearsign -o site/deb/dists/stable/InRelease site/deb/dists/stable/Release
+            echo "APT repository signed"
+          fi
+
+      - name: Build RPM repository
+        run: |
+          mkdir -p site/rpm/x86_64
+
+          # Collect all .rpm files
+          find artifacts/ -name "*.rpm" -exec cp {} site/rpm/x86_64/ \;
+
+          RPM_COUNT=$(find site/rpm/x86_64 -name "*.rpm" | wc -l)
+          echo "Found $RPM_COUNT .rpm packages"
+
+          if [ "$RPM_COUNT" -eq 0 ]; then
+            echo "No .rpm packages found, skipping RPM repo"
+            exit 0
+          fi
+
+          # Create repo metadata
+          createrepo_c site/rpm/x86_64/
+
+          # Sign repo metadata
+          if [ "$GPG_AVAILABLE" = "true" ]; then
+            gpg --batch --yes --armor --detach-sign -o site/rpm/x86_64/repodata/repomd.xml.asc site/rpm/x86_64/repodata/repomd.xml
+            echo "RPM repository signed"
+          fi
+
+          # Create .repo file for easy setup
+          cat > site/rpm/linux-guardian.repo <<EOF
+          [linux-guardian]
+          name=Linux Guardian
+          baseurl=https://brammittendorff.github.io/linux-guardian/rpm/x86_64
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://brammittendorff.github.io/linux-guardian/gpg.key
+          EOF
+
+      - name: Create index page
+        run: |
+          touch site/.nojekyll
+          cat > site/index.html <<'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+          <head><title>Linux Guardian Package Repository</title></head>
+          <body>
+          <h1>Linux Guardian Package Repository</h1>
+          <h2>Debian / Ubuntu</h2>
+          <pre>
+          curl -fsSL https://brammittendorff.github.io/linux-guardian/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/linux-guardian.gpg
+          echo "deb [signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb stable main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+          sudo apt update
+          sudo apt install linux-guardian
+          </pre>
+          <h2>Fedora / RHEL / Rocky Linux</h2>
+          <pre>
+          sudo dnf config-manager addrepo --from-repofile=https://brammittendorff.github.io/linux-guardian/rpm/linux-guardian.repo
+          sudo dnf install linux-guardian
+          </pre>
+          <h2>From source</h2>
+          <pre>
+          git clone https://github.com/brammittendorff/linux-guardian.git
+          cd linux-guardian
+          cargo build --release
+          sudo cp target/release/linux-guardian /usr/local/bin/
+          </pre>
+          <p><a href="https://github.com/brammittendorff/linux-guardian">GitHub Repository</a></p>
+          </body>
+          </html>
+          HTMLEOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
