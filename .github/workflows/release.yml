@@ -103,7 +103,7 @@ jobs:
         if: matrix.package_type == 'deb'
         run: |
           apt-get update
-          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg dpkg-sig
+          apt-get install -y curl build-essential pkg-config libssl-dev git ca-certificates bash dpkg-dev debhelper gnupg
 
       - name: Install dependencies (Fedora/Rocky)
         if: matrix.package_type == 'rpm'
@@ -127,22 +127,22 @@ jobs:
           apk add --no-cache curl gcc g++ make pkgconfig openssl-dev git ca-certificates musl-dev bash alpine-sdk gnupg
 
       - name: Import GPG key
-        if: env.GPG_PRIVATE_KEY != ''
         shell: bash
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "GPG_AVAILABLE=false" >> $GITHUB_ENV
+            exit 0
+          fi
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          # Configure gpg-agent for non-interactive use
+          mkdir -p ~/.gnupg
+          echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye 2>/dev/null || true
           echo "GPG_AVAILABLE=true" >> $GITHUB_ENV
-
-      - name: Set signing flag
-        if: env.GPG_PRIVATE_KEY == ''
-        shell: bash
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          echo "GPG_AVAILABLE=false" >> $GITHUB_ENV
 
       - name: Install Rust
         shell: bash
@@ -215,10 +215,7 @@ jobs:
           DEB_FILE="linux-guardian_${VERSION}_${{ matrix.distro }}-${{ matrix.version }}_${ARCH}.deb"
           mv "${PKG_NAME}.deb" "$DEB_FILE"
 
-          if [ "$GPG_AVAILABLE" = "true" ]; then
-            dpkg-sig --sign builder "$DEB_FILE"
-            echo "Package signed with GPG"
-          fi
+          echo "Deb package built: $DEB_FILE (signing via repository Release file)"
 
       - name: Build RPM package
         if: matrix.package_type == 'rpm'
@@ -262,7 +259,7 @@ jobs:
             cat > ~/.rpmmacros <<MACROS
           %_signature gpg
           %_gpg_name ${GPG_NAME}
-          %__gpg_sign_cmd %{__gpg} gpg --batch --no-verbose --no-armor --passphrase-fd 3 --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          %__gpg_sign_cmd %{__gpg} gpg --batch --pinentry-mode loopback --no-verbose --no-armor --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           MACROS
           fi
 
@@ -427,6 +424,9 @@ jobs:
             exit 0
           fi
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          mkdir -p ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye 2>/dev/null || true
           echo "GPG_AVAILABLE=true" >> $GITHUB_ENV
 
           # Export public key for the repository
@@ -473,8 +473,8 @@ jobs:
           # Sign Release file
           cd $GITHUB_WORKSPACE
           if [ "$GPG_AVAILABLE" = "true" ]; then
-            gpg --batch --yes --armor --detach-sign -o site/deb/dists/stable/Release.gpg site/deb/dists/stable/Release
-            gpg --batch --yes --armor --clearsign -o site/deb/dists/stable/InRelease site/deb/dists/stable/Release
+            gpg --batch --yes --pinentry-mode loopback --armor --detach-sign -o site/deb/dists/stable/Release.gpg site/deb/dists/stable/Release
+            gpg --batch --yes --pinentry-mode loopback --armor --clearsign -o site/deb/dists/stable/InRelease site/deb/dists/stable/Release
             echo "APT repository signed"
           fi
 
@@ -498,7 +498,7 @@ jobs:
 
           # Sign repo metadata
           if [ "$GPG_AVAILABLE" = "true" ]; then
-            gpg --batch --yes --armor --detach-sign -o site/rpm/x86_64/repodata/repomd.xml.asc site/rpm/x86_64/repodata/repomd.xml
+            gpg --batch --yes --pinentry-mode loopback --armor --detach-sign -o site/rpm/x86_64/repodata/repomd.xml.asc site/rpm/x86_64/repodata/repomd.xml
             echo "RPM repository signed"
           fi
 
