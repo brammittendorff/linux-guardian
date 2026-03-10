@@ -20,7 +20,7 @@ Detects active threats on your Linux system in 10-30 seconds. Built in Rust with
 
 ```bash
 curl -fsSL https://brammittendorff.github.io/linux-guardian/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/linux-guardian.gpg
-echo "deb [signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb stable main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/linux-guardian.gpg] https://brammittendorff.github.io/linux-guardian/deb stable main" | sudo tee /etc/apt/sources.list.d/linux-guardian.list
 sudo apt update && sudo apt install linux-guardian
 ```
 
