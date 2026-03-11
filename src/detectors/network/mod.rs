@@ -89,6 +89,9 @@ pub async fn analyze_connections() -> Result<Vec<Finding>> {
     info!("Analyzing network connections...");
     let mut findings = Vec::new();
 
+    // Refresh inode-to-PID cache for this scan
+    connections::invalidate_inode_cache();
+
     // Detect network exposure type (for CVSS 4.0 scoring)
     let internet_exposed = connections::detect_internet_exposure().await;
 

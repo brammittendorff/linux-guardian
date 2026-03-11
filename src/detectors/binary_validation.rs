@@ -9,22 +9,107 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use tracing::{debug, info};
 
-/// Critical system binaries that MUST be validated
-/// Using /bin paths (dpkg tracks them there, even with usrmerge)
+/// Critical system binaries that MUST be validated.
+///
+/// Binaries that dpkg tracks under /bin/ keep their /bin/ paths for accurate
+/// package-manager verification (usrmerge compatibility). Newly added binaries
+/// use the canonical /usr/bin/ or /usr/sbin/ locations found on modern systems.
+/// `check_binary_from_package` automatically probes alternate paths, so both
+/// schemes are handled transparently.
+///
+/// Coverage is informed by real-world rootkit behaviour documented in perfctl,
+/// Pygmy Goat, XorDdos, and the chkrootkit/rkhunter reference lists.
 const CRITICAL_BINARIES: &[&str] = &[
+    // --- Authentication & privilege escalation ---
     "/usr/bin/sudo", // sudo is actually in /usr/bin
     "/bin/su",       // Tracked in /bin by dpkg
+    "/usr/bin/passwd",
+    "/bin/login",    // Tracked in /bin by dpkg
+    "/usr/bin/chfn", // SUID binary, classic rootkit target
+    "/usr/bin/chsh", // SUID binary, classic rootkit target
+    // --- Shells ---
     "/bin/bash",
     "/bin/sh",
+    // --- Remote access & file transfer ---
     "/usr/bin/ssh",
     "/usr/sbin/sshd",
-    "/usr/bin/passwd",
-    "/bin/login",     // Tracked in /bin
-    "/bin/systemctl", // Tracked in /bin
-    "/bin/ps",        // Tracked in /bin
-    "/bin/ls",        // Tracked in /bin
+    "/usr/bin/scp",  // Exfiltrate files
+    "/usr/bin/curl", // Download payloads (perfctl, XorDdos)
+    "/usr/bin/wget", // Download payloads
+    // --- Process & system monitoring ---
+    "/bin/ps",         // Tracked in /bin by dpkg
+    "/bin/ls",         // Tracked in /bin by dpkg
+    "/bin/systemctl",  // Tracked in /bin by dpkg
+    "/usr/bin/top",    // Hide cryptominer CPU usage
+    "/usr/bin/pstree", // Hide process trees
+    "/usr/bin/lsof",   // Hide open files/connections
+    "/usr/bin/find",   // Prevent discovery of malware files
+    "/usr/bin/w",      // Hide logged-in attackers
+    // --- File & disk inspection ---
+    "/usr/bin/du", // Hide disk usage of malicious files
+    "/usr/bin/df", // Hide filesystem usage
+    // --- Text & binary analysis ---
+    "/usr/bin/grep", // Filter out evidence from command output
+    "/usr/bin/ldd",  // Hide malicious library injections (perfctl)
+    // --- Scheduling & persistence ---
+    "/usr/bin/crontab", // Hide persistence mechanisms (perfctl)
+    "/usr/sbin/cron",   // Hide cron-based backdoors
+    // --- Network utilities ---
     "/bin/netstat",
-    "/usr/bin/ss", // iproute2 package
+    "/usr/bin/ss",        // iproute2 package
+    "/usr/sbin/ifconfig", // Hide promiscuous mode (Pygmy Goat)
+    "/usr/sbin/ip",       // Modern ifconfig replacement
+    "/usr/bin/tcpdump",   // Modified to capture/exfiltrate traffic
+    // --- Filesystem & mounting ---
+    "/usr/bin/mount", // Mount attacker-controlled filesystems
+    // --- Firewall & network filtering ---
+    "/usr/sbin/iptables", // Open firewall holes
+    "/usr/sbin/nft",      // Modern nftables firewall
+    // --- Kernel module loading ---
+    "/usr/sbin/modprobe", // Load kernel rootkit modules
+    "/usr/sbin/insmod",   // Load kernel rootkit modules directly
+    // --- Dynamic linker & library management ---
+    "/usr/sbin/ldconfig", // Inject malicious library search paths
+    // --- Environment manipulation ---
+    "/usr/bin/env", // Inject environment variables into processes
+    // --- Package management ---
+    "/usr/bin/dpkg", // Hide tampered packages (Debian/Ubuntu)
+    "/usr/bin/rpm",  // Hide tampered packages (RPM-based systems)
+    // --- User account management ---
+    "/usr/sbin/adduser", // Create backdoor accounts
+    "/usr/sbin/useradd", // Create backdoor accounts (low-level)
+    // --- Interpreters & runtimes (common execution targets) ---
+    // NOTE: JIT processes are excluded from .text section comparison in the
+    // process hollowing detector (deep_scan.rs) to avoid false positives, but
+    // they MUST still be validated here: package ownership, permissions,
+    // suspicious strings, and modification time are equally applicable and
+    // these binaries are high-value attack targets.
+
+    // Browsers (handle credentials, sessions, cookies)
+    "/usr/bin/firefox",
+    "/usr/bin/firefox-esr",
+    "/usr/bin/brave-browser",
+    // JavaScript runtimes (common malware execution vectors)
+    "/usr/bin/node",
+    "/usr/bin/nodejs",
+    "/usr/bin/deno",
+    "/usr/bin/bun",
+    // Language runtimes (arbitrary code execution targets)
+    "/usr/bin/python3",
+    "/usr/bin/python3.11", // Common on Debian/Ubuntu 22.04+
+    "/usr/bin/java",
+    "/usr/bin/ruby",
+    "/usr/bin/php",
+    "/usr/bin/perl",
+    "/usr/bin/lua",
+    "/usr/bin/luajit",
+    // .NET runtime
+    "/usr/bin/dotnet",
+    // --- Databases (data theft targets) ---
+    "/usr/bin/psql",         // PostgreSQL client
+    "/usr/sbin/postgres",    // PostgreSQL server daemon
+    "/usr/bin/redis-server", // Redis server
+    "/usr/sbin/mysqld",      // MySQL/MariaDB server daemon
 ];
 
 /// Suspicious strings in binaries (backdoor indicators)
@@ -96,12 +181,26 @@ pub async fn validate_critical_binaries() -> Result<Vec<Finding>> {
 
 /// Check if binary belongs to a package (dpkg/rpm)
 async fn check_binary_from_package(binary_path: &str) -> Option<Finding> {
-    // Handle usrmerge: /usr/bin/foo might be registered as /bin/foo
-    let alternate_paths = vec![
+    // Build list of paths to try:
+    // 1. Original path
+    // 2. usrmerge alternates (/usr/bin/foo → /bin/foo)
+    // 3. Fully resolved symlink target (handles alternatives like iptables → xtables-nft-multi)
+    let mut alternate_paths = vec![
         binary_path.to_string(),
         binary_path.replace("/usr/bin/", "/bin/"),
         binary_path.replace("/usr/sbin/", "/sbin/"),
     ];
+
+    // Resolve symlinks (e.g. /usr/sbin/iptables → /etc/alternatives/iptables → /usr/sbin/xtables-nft-multi)
+    if let Ok(resolved) = std::fs::canonicalize(binary_path) {
+        let resolved_str = resolved.to_string_lossy().to_string();
+        if resolved_str != binary_path {
+            alternate_paths.push(resolved_str.clone());
+            // Also try usrmerge alternate of the resolved path
+            alternate_paths.push(resolved_str.replace("/usr/bin/", "/bin/"));
+            alternate_paths.push(resolved_str.replace("/usr/sbin/", "/sbin/"));
+        }
+    }
 
     // Try dpkg (Debian/Ubuntu) with all possible paths
     for path in &alternate_paths {

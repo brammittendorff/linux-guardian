@@ -329,68 +329,62 @@ pub(super) fn fingerprint_service(port: u16) -> Option<String> {
     None
 }
 
-/// Attempt to grab a banner from a service
+/// Attempt to grab a banner from a service.
+///
+/// Uses short timeouts (200ms connect, 500ms read) to avoid blocking the scan.
+/// Most local services respond in <10ms; anything slower is not worth waiting for.
 fn grab_banner(port: u16) -> Option<String> {
-    let test_ips = get_local_ips();
+    // Connect to localhost directly — no need to enumerate all local IPs
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
 
-    for test_ip in test_ips {
-        let addr_str = format!("{}:{}", test_ip, port);
-        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-            if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
-                stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(2)))
-                    .ok()?;
+    // Read banner (some services send immediately)
+    let mut buffer = [0u8; 1024];
+    use std::io::Read;
 
-                // Read banner (some services send immediately)
-                let mut buffer = [0u8; 1024];
-                use std::io::Read;
+    match stream.read(&mut buffer) {
+        Ok(n) if n > 0 => {
+            let banner = String::from_utf8_lossy(&buffer[..n.min(200)]);
+            let banner = banner.trim().replace('\n', " ").replace('\r', "");
+            if !banner.is_empty() {
+                return Some(banner);
+            }
+        }
+        _ => {}
+    }
 
-                match stream.read(&mut buffer) {
-                    Ok(n) if n > 0 => {
-                        let banner = String::from_utf8_lossy(&buffer[..n.min(200)]);
-                        let banner = banner.trim().replace('\n', " ").replace('\r', "");
-                        if !banner.is_empty() {
-                            return Some(banner);
+    // Try sending HTTP request for likely HTTP ports
+    if port == 80 || port == 443 || port >= 8000 {
+        use std::io::Write;
+        stream
+            .write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .ok()?;
+        stream.flush().ok()?;
+
+        if let Ok(n) = stream.read(&mut buffer) {
+            if n > 0 {
+                let response = String::from_utf8_lossy(&buffer[..n.min(1024)]);
+                if response.contains("HTTP/") {
+                    let mut headers = Vec::new();
+                    for line in response.lines() {
+                        let line_lower = line.to_lowercase();
+                        if line_lower.starts_with("server:")
+                            || line_lower.starts_with("x-powered-by:")
+                            || line_lower.starts_with("x-application:")
+                        {
+                            headers.push(line.trim().to_string());
                         }
                     }
-                    _ => {}
-                }
-
-                // Try sending HTTP request - many services respond to HTTP
-                // Try this for common HTTP ports and any high-numbered ports
-                if port == 80 || port == 443 || port >= 8000 {
-                    use std::io::Write;
-                    // Send HTTP HEAD request (lighter than GET)
-                    stream
-                        .write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-                        .ok()?;
-                    stream.flush().ok()?;
-
-                    if let Ok(n) = stream.read(&mut buffer) {
-                        if n > 0 {
-                            let response = String::from_utf8_lossy(&buffer[..n.min(1024)]);
-                            if response.contains("HTTP/") {
-                                let mut headers = Vec::new();
-
-                                // Extract Server and other identifying headers
-                                for line in response.lines() {
-                                    let line_lower = line.to_lowercase();
-                                    if line_lower.starts_with("server:")
-                                        || line_lower.starts_with("x-powered-by:")
-                                        || line_lower.starts_with("x-application:")
-                                    {
-                                        headers.push(line.trim().to_string());
-                                    }
-                                }
-
-                                if !headers.is_empty() {
-                                    return Some(headers.join("; "));
-                                }
-                                return Some("HTTP server".to_string());
-                            }
-                        }
+                    if !headers.is_empty() {
+                        return Some(headers.join("; "));
                     }
+                    return Some("HTTP server".to_string());
                 }
             }
         }

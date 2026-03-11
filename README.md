@@ -2,13 +2,14 @@
 
 **A lightning-fast Linux security scanner that finds REAL threats with minimal false positives**
 
-Detects active threats on your Linux system in 10-30 seconds. Built in Rust with 30+ specialized detectors for malware, CVEs, rootkits, and network attacks.
+Detects active threats on your Linux system in 10-30 seconds. Built in Rust with 50+ specialized security checks for malware, CVEs, rootkits, memory threats, and network attacks.
 
 > **Works without root!** Most security checks run perfectly fine without root privileges.
 
 ## What It Finds
 
 - **Active Threats**: Cryptominers, known malware (4M+ hashes), rootkits, reverse shells, C2 beaconing
+- **Memory Threats**: Fileless malware, process hollowing, LD_PRELOAD injection, process masquerading
 - **Exploitable CVEs**: 1,400+ actively exploited vulnerabilities from CISA catalog
 - **Network Attacks**: SSH brute force, suspicious connections, data exfiltration, exposed services
 - **Privilege Escalation**: Suspicious SUID binaries, dangerous capabilities, backdoors
@@ -86,8 +87,9 @@ linux-guardian -q                 # Quiet (findings only)
 
 ## Detection Capabilities
 
-**30+ specialized detectors** across:
+**50+ specialized checks** across:
 - Malware & Threats (cryptominers, known hashes, rootkits, reverse shells)
+- Memory Threats (fileless malware, process hollowing, LD_PRELOAD injection, masquerading)
 - Vulnerabilities (CISA KEV + NVD CVE databases)
 - Network Security (service fingerprinting, C2 beaconing, data exfiltration)
 - Privilege Escalation (SUID binaries, file capabilities)
@@ -109,9 +111,9 @@ Automate with cron:
 
 ## Privilege Separation
 
-- **10 detectors** work fully without root (CVE checks, network analysis, kernel hardening)
-- **11 detectors** work partially without root (SSH config, firewall status, own processes)
-- **1 detector** requires root (SUID binary scanning)
+- **13 detectors** work fully without root (CVE checks, network analysis, kernel hardening, fileless malware, process masquerading)
+- **11 detectors** work partially without root (SSH config, firewall status, own processes, LD_PRELOAD injection)
+- **3 detectors** require root (SUID binary scanning, deep memory scanning, process hollowing)
 
 ## How It Works
 
@@ -160,7 +162,7 @@ All scanning is local | No data sent to external servers | Open source | No tele
 
 - Kernel rootkits: Limited detection (needs eBPF/kernel modules)
 - Encrypted malware: Can't scan encrypted files
-- Memory-only threats: Doesn't scan RAM
+- Memory-only threats: Deep memory scanning requires root (basic checks work without)
 - Zero-days: Only detects known threats + suspicious behavior
 
 Use as **part** of your security, not the only tool.

@@ -11,6 +11,11 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
     info!("🔍 Checking for systemd service tampering...");
     let mut findings = Vec::new();
 
+    // Track canonical paths to avoid duplicate findings when directories
+    // are symlinked (e.g. /lib/systemd/system → /usr/lib/systemd/system)
+    // or unit files are symlinked into .wants/ directories.
+    let mut seen_canonical: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
     // Locations to check for systemd units
     let unit_paths = [
         "/etc/systemd/system",
@@ -60,6 +65,15 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                 .filter_map(|e| e.ok())
             {
                 let file_path = entry.path();
+
+                // Resolve symlinks to the real file and skip if already seen.
+                let canonical = match fs::canonicalize(file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if !seen_canonical.insert(canonical) {
+                    continue;
+                }
 
                 // Only check .service, .timer, .socket files
                 if let Some(ext) = file_path.extension() {
@@ -251,60 +265,88 @@ pub async fn check_systemd_timers() -> Result<Vec<Finding>> {
 pub async fn check_init_scripts() -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
 
-    let init_dirs = ["/etc/init.d", "/etc/rc.local"];
-
-    for init_path in &init_dirs {
-        if let Ok(metadata) = fs::metadata(init_path) {
-            if let Ok(modified) = metadata.modified() {
-                let age = std::time::SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or_default();
-
-                // If init scripts were modified in last 7 days, flag it
-                if age.as_secs() < 7 * 24 * 3600 {
-                    findings.push(
-                        Finding::medium(
-                            "init_script_modified",
-                            "Init Script Recently Modified",
-                            &format!(
-                                "{} was modified {:.1} days ago. Unusual for init scripts.",
-                                init_path,
-                                age.as_secs_f32() / 86400.0
-                            ),
-                        )
-                        .with_remediation(&format!("Review: cat {}", init_path)),
-                    );
-                }
+    // Check individual files inside /etc/init.d for recent modifications
+    if let Ok(entries) = fs::read_dir("/etc/init.d") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
             }
-        }
+            if let Ok(metadata) = path.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    let age = std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
 
-        // Check rc.local content if it exists
-        if *init_path == "/etc/rc.local" {
-            if let Ok(content) = fs::read_to_string(init_path) {
-                let content_lower = content.to_lowercase();
-
-                let suspicious = [
-                    "curl",
-                    "wget",
-                    "/tmp",
-                    "bash -c",
-                    "nc -e",
-                    "nc -l",
-                    "/dev/tcp/",
-                    "base64",
-                ];
-                for pattern in &suspicious {
-                    if content_lower.contains(pattern) {
+                    if age.as_secs() < 7 * 24 * 3600 {
+                        let file_name = path.display();
                         findings.push(
-                            Finding::high(
-                                "rc_local_backdoor",
-                                "Suspicious Command in rc.local",
-                                &format!("rc.local contains suspicious command: {}", pattern),
+                            Finding::medium(
+                                "init_script_modified",
+                                "Init Script Recently Modified",
+                                &format!(
+                                    "{} was modified {:.1} days ago. Unusual for init scripts.",
+                                    file_name,
+                                    age.as_secs_f32() / 86400.0
+                                ),
                             )
-                            .with_remediation("Review: cat /etc/rc.local"),
+                            .with_remediation(&format!("Review: cat '{}'", file_name)),
                         );
                     }
                 }
+            }
+        }
+    }
+
+    // Check rc.local separately (it's a file, not a directory)
+    let rc_local = "/etc/rc.local";
+    if let Ok(metadata) = fs::metadata(rc_local) {
+        if let Ok(modified) = metadata.modified() {
+            let age = std::time::SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or_default();
+
+            if age.as_secs() < 7 * 24 * 3600 {
+                findings.push(
+                    Finding::medium(
+                        "init_script_modified",
+                        "Init Script Recently Modified",
+                        &format!(
+                            "{} was modified {:.1} days ago. Unusual for init scripts.",
+                            rc_local,
+                            age.as_secs_f32() / 86400.0
+                        ),
+                    )
+                    .with_remediation(&format!("Review: cat '{}'", rc_local)),
+                );
+            }
+        }
+    }
+
+    // Check rc.local content for suspicious commands
+    if let Ok(content) = fs::read_to_string(rc_local) {
+        let content_lower = content.to_lowercase();
+
+        let suspicious = [
+            "curl",
+            "wget",
+            "/tmp",
+            "bash -c",
+            "nc -e",
+            "nc -l",
+            "/dev/tcp/",
+            "base64",
+        ];
+        for pattern in &suspicious {
+            if content_lower.contains(pattern) {
+                findings.push(
+                    Finding::high(
+                        "rc_local_backdoor",
+                        "Suspicious Command in rc.local",
+                        &format!("rc.local contains suspicious command: {}", pattern),
+                    )
+                    .with_remediation("Review: cat /etc/rc.local"),
+                );
             }
         }
     }

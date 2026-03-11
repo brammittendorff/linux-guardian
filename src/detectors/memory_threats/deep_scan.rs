@@ -1,8 +1,10 @@
+use super::allowlists::*;
+use super::elf_parser::*;
+use super::shellcode::*;
 use super::utils::{parse_address_range, read_process_memory};
 use crate::models::Finding;
 use anyhow::Result;
 use procfs::process::all_processes;
-use std::collections::HashMap;
 use std::fs;
 use tracing::{debug, info};
 
@@ -166,8 +168,27 @@ pub async fn deep_scan_process_memory(is_root: bool) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-/// Detect process hollowing by comparing in-memory text segment vs on-disk binary
-/// Requires root
+/// Detect process hollowing by comparing .text section hashes between
+/// in-memory and on-disk binaries.
+///
+/// # Why .text section comparison?
+///
+/// The .text section is mapped read-only + executable (r-xp) and is NEVER
+/// modified by the dynamic linker on modern PIE/PIC binaries. All relocations
+/// (R_X86_64_RELATIVE, GOT/PLT patching) only affect data segments. If the
+/// .text section in memory differs from disk, code has been tampered with.
+///
+/// This replaces the old naive ELF header comparison which produced massive
+/// false positives because ASLR/PIE relocation legitimately modifies header
+/// fields like e_entry, e_phoff, e_shoff.
+///
+/// # False positive prevention
+/// - Skips binaries with DT_TEXTREL (rare; text relocations modify .text legitimately)
+/// - Skips known JIT/Electron processes (Chrome, VS Code, Python, Java, etc.)
+/// - Skips processes being actively debugged (breakpoints modify .text)
+/// - Compares only the .text section, not headers or data segments
+///
+/// Requires root.
 pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
     if !is_root {
         debug!("Skipping process hollowing detection (requires root)");
@@ -198,6 +219,7 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
             .map(|s| s.comm.clone())
             .unwrap_or_default();
 
+        // Skip kernel threads and our own process
         if comm.starts_with('[') && comm.ends_with(']') {
             continue;
         }
@@ -205,72 +227,155 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
             continue;
         }
 
+        // Resolve /proc/PID/exe
         let exe_link = format!("/proc/{}/exe", pid);
         let exe_path = match fs::read_link(&exe_link) {
             Ok(p) => p,
             Err(_) => continue,
         };
 
+        // Skip deleted binaries (handled by fileless malware detector)
         if exe_path.to_string_lossy().contains("(deleted)") {
             continue;
         }
 
+        let exe_str = exe_path.to_string_lossy();
+
+        // Skip processes known to legitimately modify executable memory (JIT, Electron/V8)
+        if is_known_self_modifying_process(&comm, &exe_str) {
+            debug!(
+                "Skipping known JIT/self-modifying process {} (PID: {})",
+                comm, pid
+            );
+            continue;
+        }
+
+        // Skip processes being debugged (breakpoints modify .text)
+        if is_being_traced(pid) {
+            debug!("Skipping traced process {} (PID: {})", comm, pid);
+            continue;
+        }
+
+        // Determine the path to use when opening the binary on disk.
+        //
+        // For processes running in a different mount namespace (e.g. Docker containers),
+        // `fs::read_link("/proc/PID/exe")` resolves through the HOST filesystem. The
+        // resulting path (e.g. `/usr/bin/bash`) points to the HOST's bash binary, but the
+        // container loaded a DIFFERENT binary from its own overlay filesystem layer. Reading
+        // the host binary and comparing it against the container process's in-memory .text
+        // section will always produce a mismatch starting at byte 0 — a systematic false
+        // positive.
+        //
+        // The fix: when a process is in a different mount namespace, open the binary via
+        // `/proc/PID/root/<exe_path>`. The kernel resolves that path through the process's
+        // own filesystem namespace, giving us the exact binary the container loaded.
+        //
+        // `/proc/PID/maps` always shows the path as seen inside the process's namespace
+        // (e.g. `/usr/bin/bash`), so we keep using `exe_str` for the maps lookup — only
+        // the on-disk binary read uses the namespace-aware path.
+        let disk_binary_path = if is_in_different_mount_namespace(pid) {
+            debug!(
+                "Process {} (PID: {}) is in a container; reading binary via /proc/{}/root{}",
+                comm, pid, pid, exe_str
+            );
+            std::path::PathBuf::from(format!("/proc/{}/root{}", pid, exe_str))
+        } else {
+            exe_path.clone()
+        };
+
+        // Parse the on-disk ELF to find .text section.
+        // We parse from `disk_binary_path` which is namespace-correct.
+        let text_info = match parse_elf_text_section(&disk_binary_path) {
+            Some(info) => info,
+            None => continue,
+        };
+
+        // Skip binaries with text relocations (TEXTREL) — .text is legitimately modified
+        if text_info.has_textrel {
+            debug!("Skipping {} (PID: {}) — has DT_TEXTREL", comm, pid);
+            continue;
+        }
+
+        // Find the r-xp file-backed mapping for this binary in /proc/PID/maps
         let maps_path = format!("/proc/{}/maps", pid);
         let maps = match fs::read_to_string(&maps_path) {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        // Find the first r-xp mapped region matching the binary (text segment)
-        let exe_str = exe_path.to_string_lossy();
-        let text_region = maps.lines().find(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.len() > 5 && parts[1].starts_with("r-x") && line.contains(exe_str.as_ref())
-        });
-
-        let text_addr = match text_region {
-            Some(line) => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                parse_address_range(parts[0]).map(|(start, _)| start)
-            }
+        let text_mapping = match find_text_mapping(&maps, &exe_str, text_info.file_offset) {
+            Some(m) => m,
             None => continue,
         };
 
-        let text_addr = match text_addr {
-            Some(a) => a,
-            None => continue,
-        };
+        // Calculate the in-memory address of the .text section.
+        //
+        // Layout: each r-xp mapping covers a contiguous range of the file starting at
+        // `text_mapping.file_offset`. The virtual address of any byte at file offset F
+        // within that mapping is:
+        //
+        //   vaddr(F) = mapping_start + (F - mapping_file_offset)
+        //
+        // find_text_mapping already guarantees that text_info.file_offset falls within
+        // [mapping.file_offset, mapping.file_offset + mapping_size), so the subtraction
+        // cannot underflow.
+        let mem_text_addr = text_mapping.start + (text_info.file_offset - text_mapping.file_offset);
 
-        let mem_data = match read_process_memory(pid, text_addr, 4096) {
+        // Read the .text section from memory (limit to 1MB for performance)
+        let read_size = text_info.size.min(1024 * 1024) as usize;
+        let mem_text = match read_process_memory(pid, mem_text_addr, read_size) {
             Ok(d) => d,
             Err(_) => continue,
         };
 
-        let disk_data = match fs::read(&exe_path) {
+        // Read the .text section from the namespace-correct on-disk binary
+        let disk_text = match read_file_range(&disk_binary_path, text_info.file_offset, read_size) {
             Ok(d) => d,
             Err(_) => continue,
         };
 
-        // Compare ELF headers (first 64 bytes)
-        if mem_data.len() >= 64 && disk_data.len() >= 64 && mem_data[..64] != disk_data[..64] {
+        // Compare hashes
+        if mem_text.len() != disk_text.len() || mem_text.len() < 64 {
+            continue;
+        }
+
+        let mem_hash = sha256_hash(&mem_text);
+        let disk_hash = sha256_hash(&disk_text);
+
+        if mem_hash != disk_hash {
+            // Find the first differing offset for diagnostics
+            let diff_offset = mem_text
+                .iter()
+                .zip(disk_text.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+
             findings.push(
                 Finding::critical(
                     "process_hollowing",
-                    "Process Hollowing Detected",
+                    "Process Code Tampered — .text Section Modified",
                     &format!(
-                        "Process '{}' (PID: {}) has modified ELF header in memory compared \
-                         to on-disk binary {}. Indicates process hollowing.",
-                        comm, pid, exe_str
+                        "Process '{}' (PID: {}) has a modified .text section compared to \
+                         on-disk binary '{}'. The .text section is read-only and should \
+                         NEVER differ from disk (ASLR/PIE/dynamic linking do not modify it). \
+                         First difference at offset 0x{:x}. This indicates code injection \
+                         or process hollowing.",
+                        comm, pid, exe_str, diff_offset
                     ),
                 )
                 .with_remediation(&format!(
-                    "Kill immediately: sudo kill -9 {} && verify: sha256sum '{}'",
-                    pid, exe_str
+                    "Investigate: cat /proc/{}/maps | grep r-xp && \
+                     sha256sum '{}' && sudo kill -9 {} if confirmed malicious",
+                    pid, exe_str, pid
                 ))
                 .with_details(serde_json::json!({
                     "pid": pid,
                     "comm": comm,
                     "exe": exe_str.to_string(),
+                    "text_size": text_info.size,
+                    "mem_hash": mem_hash,
+                    "disk_hash": disk_hash,
+                    "first_diff_offset": format!("0x{:x}", diff_offset),
                     "technique": "process_hollowing",
                     "mitre_attack": "T1055.012"
                 })),
@@ -283,106 +388,4 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
     }
 
     Ok(findings)
-}
-
-/// Detect common shellcode patterns in memory
-fn detect_shellcode_patterns(data: &[u8]) -> Option<&'static str> {
-    if data.len() < 16 {
-        return None;
-    }
-
-    // NOP sled detection (20+ consecutive NOPs)
-    let mut nop_count = 0;
-    for &byte in data {
-        if byte == 0x90 {
-            nop_count += 1;
-            if nop_count >= 20 {
-                return Some("NOP sled");
-            }
-        } else {
-            nop_count = 0;
-        }
-    }
-
-    // Common x86_64 shellcode patterns
-    for window in data.windows(4) {
-        if window == [0x48, 0x31, 0xf6, 0x48] {
-            return Some("x86_64 execve setup");
-        }
-    }
-
-    // Multiple syscall instructions in a small region
-    let mut syscall_count = 0;
-    for window in data.windows(2) {
-        if window == [0x0f, 0x05] || window == [0xcd, 0x80] {
-            syscall_count += 1;
-        }
-    }
-    if syscall_count >= 3 && data.len() < 4096 {
-        return Some("multiple syscall instructions");
-    }
-
-    None
-}
-
-/// Check for suspicious strings in executable memory
-fn check_suspicious_strings(
-    data: &[u8],
-    pid: i32,
-    comm: &str,
-    addr: u64,
-    findings: &mut Vec<Finding>,
-) {
-    let mut strings = Vec::new();
-    let mut current = String::new();
-    for &byte in data {
-        if (0x20..0x7f).contains(&byte) {
-            current.push(byte as char);
-        } else {
-            if current.len() >= 6 {
-                strings.push(current.clone());
-            }
-            current.clear();
-        }
-    }
-    if current.len() >= 6 {
-        strings.push(current);
-    }
-
-    let suspicious_indicators: HashMap<&str, &str> = [
-        ("/bin/sh", "shell execution"),
-        ("/bin/bash", "shell execution"),
-        ("stratum+tcp://", "cryptomining pool"),
-        ("stratum+ssl://", "cryptomining pool"),
-        ("/dev/tcp/", "bash reverse shell"),
-        ("socket", "network socket"),
-        ("connect", "network connection"),
-    ]
-    .iter()
-    .copied()
-    .collect();
-
-    for s in &strings {
-        let s_lower = s.to_lowercase();
-        for (indicator, desc) in &suspicious_indicators {
-            if s_lower.contains(&indicator.to_lowercase()) {
-                findings.push(
-                    Finding::high(
-                        "memory_injection",
-                        "Suspicious String in Executable Memory",
-                        &format!(
-                            "Process '{}' (PID: {}) has {} indicator ('{}') in anonymous \
-                             executable memory at 0x{:x}.",
-                            comm, pid, desc, indicator, addr
-                        ),
-                    )
-                    .with_remediation(&format!(
-                        "Investigate: sudo kill -9 {} if unauthorized",
-                        pid
-                    )),
-                );
-                return; // One finding per region is enough
-            }
-        }
-    }
 }

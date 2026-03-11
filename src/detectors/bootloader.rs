@@ -66,17 +66,12 @@ pub async fn check_bootloader_security() -> Result<Vec<Finding>> {
                 debug!("GRUB has password protection configured");
             }
 
-            // Check for dangerous boot parameters
-            if content.contains("init=/bin/bash") || content.contains("single") {
-                findings.push(
-                    Finding::medium(
-                        "bootloader",
-                        "Dangerous Boot Parameters in GRUB Config",
-                        "GRUB configuration contains potentially dangerous boot parameters",
-                    )
-                    .with_remediation("Review GRUB configuration: sudo vi /etc/default/grub"),
-                );
-            }
+            // Check for dangerous boot parameters, categorized by severity.
+            // "critical" = authentication bypass or kernel code integrity defeat
+            // "high"     = disables major security features (MAC, hardware protections)
+            // "medium"   = disables individual CPU mitigations or hardening
+
+            check_boot_params(&content, &mut findings);
         }
     } else {
         debug!("GRUB configuration not found (might be using different bootloader)");
@@ -84,6 +79,294 @@ pub async fn check_bootloader_security() -> Result<Vec<Finding>> {
 
     info!("  Checked bootloader security");
     Ok(findings)
+}
+
+/// Severity level for a dangerous boot parameter
+enum ParamSeverity {
+    Critical,
+    High,
+    Medium,
+}
+
+/// Check GRUB config content for dangerous boot parameters
+fn check_boot_params(content: &str, findings: &mut Vec<Finding>) {
+    // (parameter, severity, explanation)
+    let dangerous_params: &[(&str, ParamSeverity, &str)] = &[
+        // --- CRITICAL: Authentication bypass / kernel code integrity ---
+        (
+            "init=/bin/bash",
+            ParamSeverity::Critical,
+            "Replaces init with root shell — complete authentication bypass",
+        ),
+        (
+            "init=/bin/sh",
+            ParamSeverity::Critical,
+            "Replaces init with root shell — complete authentication bypass",
+        ),
+        (
+            "init=/sysroot/bin/bash",
+            ParamSeverity::Critical,
+            "Replaces init with root shell (ostree variant) — complete authentication bypass",
+        ),
+        (
+            "rd.break",
+            ParamSeverity::Critical,
+            "Drops to initramfs root shell — used to reset root passwords",
+        ),
+        (
+            "rodata=off",
+            ParamSeverity::Critical,
+            "Makes kernel code/data writable at runtime — defeats W^X for the kernel",
+        ),
+        (
+            "rodata=0",
+            ParamSeverity::Critical,
+            "Makes kernel code/data writable at runtime — defeats W^X for the kernel",
+        ),
+        // --- HIGH: Disables major security features ---
+        (
+            "systemd.unit=rescue.target",
+            ParamSeverity::High,
+            "Boots into rescue mode — may provide root shell without password",
+        ),
+        (
+            "systemd.unit=emergency.target",
+            ParamSeverity::High,
+            "Boots into emergency mode — root shell before most services start",
+        ),
+        (
+            "selinux=0",
+            ParamSeverity::High,
+            "Disables SELinux mandatory access control entirely",
+        ),
+        (
+            "enforcing=0",
+            ParamSeverity::High,
+            "Sets SELinux to permissive — violations logged but not enforced",
+        ),
+        (
+            "apparmor=0",
+            ParamSeverity::High,
+            "Disables AppArmor application confinement",
+        ),
+        (
+            "security=none",
+            ParamSeverity::High,
+            "Disables all Linux Security Modules (SELinux, AppArmor, etc.)",
+        ),
+        (
+            "lockdown=none",
+            ParamSeverity::High,
+            "Disables kernel lockdown — allows userspace to modify running kernel",
+        ),
+        (
+            "module.sig_enforce=0",
+            ParamSeverity::High,
+            "Disables kernel module signature enforcement — allows unsigned/tampered module loading",
+        ),
+        (
+            "nosmep",
+            ParamSeverity::High,
+            "Disables Supervisor Mode Execution Prevention — kernel can execute userspace code",
+        ),
+        (
+            "nosmap",
+            ParamSeverity::High,
+            "Disables Supervisor Mode Access Prevention — kernel can freely read/write userspace memory",
+        ),
+        (
+            "noexec=off",
+            ParamSeverity::High,
+            "Disables NX bit enforcement — allows code execution from data pages",
+        ),
+        (
+            "noexec32=off",
+            ParamSeverity::High,
+            "Disables NX for 32-bit executables — allows code execution from data segments",
+        ),
+        (
+            "iommu=off",
+            ParamSeverity::High,
+            "Disables IOMMU — allows unrestricted DMA attacks via Thunderbolt/PCIe",
+        ),
+        (
+            "intel_iommu=off",
+            ParamSeverity::High,
+            "Disables Intel VT-d IOMMU — allows DMA attacks",
+        ),
+        (
+            "amd_iommu=off",
+            ParamSeverity::High,
+            "Disables AMD IOMMU — allows DMA attacks",
+        ),
+        (
+            "nokaslr",
+            ParamSeverity::High,
+            "Disables kernel ASLR — makes kernel addresses predictable for exploit development",
+        ),
+        (
+            "mitigations=off",
+            ParamSeverity::High,
+            "Disables ALL CPU vulnerability mitigations (Spectre, Meltdown, MDS, L1TF, etc.)",
+        ),
+        (
+            "debugfs=on",
+            ParamSeverity::High,
+            "Mounts debugfs — exposes internal kernel debugging interfaces to userspace",
+        ),
+        (
+            "kgdbwait",
+            ParamSeverity::High,
+            "Waits for kernel debugger at boot — allows full kernel control via debug connection",
+        ),
+        (
+            "audit=0",
+            ParamSeverity::High,
+            "Disables kernel audit subsystem — prevents security event logging and forensics",
+        ),
+        // --- MEDIUM: Individual CPU mitigations / hardening weakened ---
+        (
+            "nopti",
+            ParamSeverity::Medium,
+            "Disables Page Table Isolation — removes Meltdown mitigation",
+        ),
+        (
+            "kpti=0",
+            ParamSeverity::Medium,
+            "Disables kernel page table isolation (ARM64 Meltdown mitigation)",
+        ),
+        (
+            "nospectre_v1",
+            ParamSeverity::Medium,
+            "Disables Spectre v1 (bounds check bypass) mitigation",
+        ),
+        (
+            "nospectre_v2",
+            ParamSeverity::Medium,
+            "Disables Spectre v2 (branch target injection) mitigation",
+        ),
+        (
+            "spectre_v2=off",
+            ParamSeverity::Medium,
+            "Disables all Spectre v2 mitigations",
+        ),
+        (
+            "spec_store_bypass_disable=off",
+            ParamSeverity::Medium,
+            "Disables Spectre v4 (Speculative Store Bypass) mitigation",
+        ),
+        (
+            "l1tf=off",
+            ParamSeverity::Medium,
+            "Disables L1 Terminal Fault (Foreshadow) mitigation",
+        ),
+        (
+            "mds=off",
+            ParamSeverity::Medium,
+            "Disables Microarchitectural Data Sampling mitigation",
+        ),
+        (
+            "tsx_async_abort=off",
+            ParamSeverity::Medium,
+            "Disables TSX Async Abort (TAA) mitigation",
+        ),
+        (
+            "srbds=off",
+            ParamSeverity::Medium,
+            "Disables Special Register Buffer Data Sampling mitigation",
+        ),
+        (
+            "mmio_stale_data=off",
+            ParamSeverity::Medium,
+            "Disables MMIO Stale Data mitigation",
+        ),
+        (
+            "retbleed=off",
+            ParamSeverity::Medium,
+            "Disables Retbleed (return speculation) mitigation",
+        ),
+        (
+            "gather_data_sampling=off",
+            ParamSeverity::Medium,
+            "Disables Gather Data Sampling (Downfall) mitigation",
+        ),
+        (
+            "spec_rstack_overflow=off",
+            ParamSeverity::Medium,
+            "Disables Speculative Return Stack Overflow (AMD Inception) mitigation",
+        ),
+        (
+            "tsx=on",
+            ParamSeverity::Medium,
+            "Enables Intel TSX — basis of multiple side-channel attacks (TAA, ZombieLoad)",
+        ),
+        (
+            "norandmaps",
+            ParamSeverity::Medium,
+            "Disables userspace ASLR — makes all process memory layouts predictable",
+        ),
+        (
+            "vsyscall=native",
+            ParamSeverity::Medium,
+            "Enables legacy vsyscall page at fixed address — reliable ROP gadget source",
+        ),
+        (
+            "hardened_usercopy=0",
+            ParamSeverity::Medium,
+            "Disables hardened usercopy checks — removes slab boundary validation",
+        ),
+        (
+            "init_on_alloc=0",
+            ParamSeverity::Medium,
+            "Disables zeroing of memory allocations — stale data may leak",
+        ),
+        (
+            "init_on_free=0",
+            ParamSeverity::Medium,
+            "Disables zeroing of freed memory — sensitive data (keys, passwords) may persist",
+        ),
+        (
+            "iommu.passthrough=1",
+            ParamSeverity::Medium,
+            "Sets IOMMU to passthrough mode — devices bypass DMA protection",
+        ),
+        (
+            "randomize_kstack_offset=off",
+            ParamSeverity::Medium,
+            "Disables kernel stack randomization on syscall entry",
+        ),
+        (
+            "nopku",
+            ParamSeverity::Medium,
+            "Disables Memory Protection Keys — removes hardware memory domain isolation",
+        ),
+    ];
+
+    for (param, severity, reason) in dangerous_params {
+        if content.contains(param) {
+            let finding = match severity {
+                ParamSeverity::Critical => Finding::critical(
+                    "bootloader",
+                    "Critical Boot Parameter in GRUB Config",
+                    &format!("'{}': {}", param, reason),
+                ),
+                ParamSeverity::High => Finding::high(
+                    "bootloader",
+                    "Dangerous Boot Parameter in GRUB Config",
+                    &format!("'{}': {}", param, reason),
+                ),
+                ParamSeverity::Medium => Finding::medium(
+                    "bootloader",
+                    "Security-Weakening Boot Parameter in GRUB Config",
+                    &format!("'{}': {}", param, reason),
+                ),
+            };
+            findings.push(finding.with_remediation(&format!(
+                "Review and remove '{}' from /etc/default/grub, then run: sudo update-grub",
+                param
+            )));
+        }
+    }
 }
 
 #[cfg(test)]

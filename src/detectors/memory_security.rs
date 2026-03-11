@@ -47,39 +47,139 @@ fn is_jit_compiler(maps_content: &str, process_name: &str, anonymous_rwx_count: 
     let maps_lower = maps_content.to_lowercase();
     let process_lower = process_name.to_lowercase();
 
-    // Generic heuristic 1: Check for JIT-specific file patterns
-    // JIT engines typically have these artifacts
+    // Generic heuristic 1: Check for JIT-specific library/file patterns in maps
     let jit_indicators = [
-        "v8_context_snapshot", // V8 snapshot files
-        "snapshot_blob",       // V8/Chromium
-        "icudtl.dat",          // Internationalization data (Chrome/Node.js/Electron)
-        ".node",               // Node.js native modules
-        "jvm",                 // Java Virtual Machine
-        "jre",                 // Java Runtime Environment
-        "hotspot",             // JVM JIT compiler
-        "mozjs",               // Mozilla JavaScript
-        "javascriptcore",      // WebKit JS engine
-        "luajit",              // Lua JIT
-        "pypy",                // Python JIT
-        "mono",                // .NET runtime
-        "dotnet",              // .NET
-        "coreclr",             // .NET Core
-        "qemu",                // QEMU emulator
-        "wasm",                // WebAssembly
-        "ruby",                // Ruby (potential JIT)
+        "v8_context_snapshot",
+        "snapshot_blob",
+        "icudtl.dat", // V8/Chromium
+        ".node",      // Node.js native modules
+        "jvm",
+        "jre",
+        "hotspot",
+        "coreclr", // Java/.NET JIT
+        "mozjs",
+        "spidermonkey",
+        "libmozjs", // Mozilla SpiderMonkey
+        "javascriptcore",
+        "libjavascriptcoregtk",
+        "libjsc", // WebKit JSC
+        "luajit", // LuaJIT
+        "pypy",   // PyPy JIT
+        "mono",
+        "dotnet", // .NET runtime
+        "qemu",   // QEMU dynamic binary translation
+        "wasm",
+        "wasmtime",
+        "wasmer",
+        "cranelift", // WebAssembly
+        "libffi",    // Foreign function interface (creates trampolines)
+        "libpcre2-8",
+        "libpcre2-jit", // PCRE2 regex JIT
+        "liborc",       // GStreamer ORC JIT
+        "libllvm",
+        "libLLVM", // LLVM (used by PostgreSQL JIT, Julia, etc.)
+        "graalvm", // GraalVM polyglot JIT
+        "beamasm", // Erlang/OTP BeamAsm JIT
     ];
 
     for indicator in &jit_indicators {
-        if maps_lower.contains(indicator) {
+        if maps_lower.contains(&indicator.to_lowercase()) {
             return true;
         }
     }
 
-    // Generic heuristic 2: Look for process names that commonly use JIT
-    // Browsers, IDEs, language runtimes
+    // Generic heuristic 2: Process names known to use JIT
     let jit_process_patterns = [
-        "chrome", "chromium", "firefox", "safari", "edge", "code", "electron", "discord", "slack",
-        "teams", "spotify", "node", "java", "python", "ruby", "mono",
+        // Browsers
+        "chrome",
+        "chromium",
+        "firefox",
+        "brave",
+        "vivaldi",
+        "opera",
+        "msedge",
+        "epiphany",
+        "falkon",
+        "thunderbird",
+        // Electron/CEF
+        "electron",
+        "code",
+        "discord",
+        "slack",
+        "teams",
+        "spotify",
+        "signal",
+        "obsidian",
+        "notion",
+        "figma",
+        "1password",
+        "bitwarden",
+        "postman",
+        "cursor",
+        "element",
+        "hyper",
+        "tabby",
+        // JS runtimes
+        "node",
+        "deno",
+        "bun",
+        // Language runtimes
+        "java",
+        "python",
+        "ruby",
+        "pypy",
+        "luajit",
+        "php",
+        "dotnet",
+        "mono",
+        "julia",
+        "dart",
+        "erlang",
+        "beam.smp",
+        "elixir",
+        "guile",
+        "racket",
+        "sbcl",
+        "gjs",
+        "cjs",
+        // JVM tools
+        "idea",
+        "pycharm",
+        "clion",
+        "goland",
+        "webstorm",
+        "eclipse",
+        "gradle",
+        "mvn",
+        "bazel",
+        // Databases with JIT
+        "postgres",
+        "clickhouse",
+        // Emulators
+        "qemu",
+        "dolphin-emu",
+        "pcsx2",
+        "rpcs3",
+        "ppsspp",
+        "retroarch",
+        "dosbox",
+        "wine",
+        "wine64",
+        "proton",
+        "box86",
+        "box64",
+        // Virtualization
+        "virtualbox",
+        "vmware",
+        // Desktop with JS engines
+        "gnome-shell",
+        "cinnamon",
+        "blender",
+        "obs",
+        // Debuggers
+        "gdb",
+        "lldb",
+        "valgrind",
     ];
 
     for pattern in &jit_process_patterns {
