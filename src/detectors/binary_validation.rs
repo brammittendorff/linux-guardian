@@ -159,17 +159,22 @@ pub async fn validate_critical_binaries() -> Result<Vec<Finding>> {
             continue; // If not from package, already flagged
         }
 
-        // 2. Check file permissions
+        // 2. Verify package checksum (catches tampered binaries that ARE from a package)
+        if let Some(finding) = verify_binary_checksum(binary_path) {
+            findings.push(finding);
+        }
+
+        // 3. Check file permissions
         if let Some(finding) = check_binary_permissions(binary_path) {
             findings.push(finding);
         }
 
-        // 3. Check for suspicious strings (backdoor detection)
+        // 4. Check for suspicious strings (backdoor detection)
         if let Some(finding) = check_binary_strings(binary_path).await {
             findings.push(finding);
         }
 
-        // 4. Check modification time (recently modified = suspicious)
+        // 5. Check modification time (recently modified = suspicious)
         if let Some(finding) = check_binary_modification_time(binary_path) {
             findings.push(finding);
         }
@@ -243,6 +248,110 @@ async fn check_binary_from_package(binary_path: &str) -> Option<Finding> {
             binary_path
         )),
     )
+}
+
+/// Verify binary checksum against what the package manager expects.
+///
+/// `dpkg -S` only confirms the package OWNS the file. `dpkg -V` actually
+/// verifies the md5sum matches what was installed. This catches binaries
+/// that are package-managed but have been tampered with on disk.
+fn verify_binary_checksum(binary_path: &str) -> Option<Finding> {
+    // Get the package name for this binary
+    let package = {
+        let paths_to_try = [
+            binary_path.to_string(),
+            binary_path.replace("/usr/bin/", "/bin/"),
+            binary_path.replace("/usr/sbin/", "/sbin/"),
+        ];
+
+        let mut pkg = None;
+        for path in &paths_to_try {
+            if let Ok(output) = Command::new("dpkg").args(["-S", path]).output() {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Format: "package: /path/to/file"
+                    if let Some(name) = stdout.split(':').next() {
+                        // Handle diversions: "diversion by X from: package"
+                        let name = name.trim();
+                        if !name.contains(' ') {
+                            pkg = Some(name.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        pkg
+    };
+
+    let package = package?;
+
+    // Run dpkg -V to verify checksums
+    // Output format: "??5?????? c /path/to/file" where '5' means md5sum differs
+    if let Ok(output) = Command::new("dpkg").args(["-V", &package]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Resolve binary path for matching (handle usrmerge symlinks)
+            let canonical = fs::canonicalize(binary_path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| binary_path.to_string());
+
+            for line in stdout.lines() {
+                let line = line.trim();
+                // Check if this line mentions our binary (by original or canonical path)
+                if line.contains(binary_path) || line.contains(&canonical) {
+                    // The '5' in position 2 (0-indexed) means md5sum mismatch
+                    if line.len() >= 9 && line.as_bytes()[2] == b'5' {
+                        return Some(
+                            Finding::critical(
+                                "binary_validation",
+                                "Critical Binary Checksum Mismatch",
+                                &format!(
+                                    "{} (package: {}) has a different checksum than what was \
+                                     installed. The binary has been MODIFIED on disk. This is \
+                                     a strong indicator of tampering.",
+                                    binary_path, package
+                                ),
+                            )
+                            .with_remediation(&format!(
+                                "URGENT: Reinstall package: sudo apt-get install --reinstall {} && \
+                                 Investigate who modified it: stat '{}' && sudo ausearch -f '{}'",
+                                package, binary_path, binary_path
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Also try rpm -Vf for RPM-based systems
+    if let Ok(output) = Command::new("rpm").args(["-Vf", binary_path]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains(binary_path) && line.contains("5") {
+                    return Some(
+                        Finding::critical(
+                            "binary_validation",
+                            "Critical Binary Checksum Mismatch",
+                            &format!(
+                                "{} has a different checksum than the RPM package expects. \
+                                 The binary may have been tampered with.",
+                                binary_path
+                            ),
+                        )
+                        .with_remediation(&format!(
+                            "Reinstall: sudo dnf reinstall $(rpm -qf '{}')",
+                            binary_path
+                        )),
+                    );
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Check binary file permissions

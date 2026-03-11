@@ -64,3 +64,90 @@ pub fn truncate_str(s: &str, max: usize) -> String {
         format!("{}...", &s[..max])
     }
 }
+
+/// Calculate Shannon entropy of a byte buffer.
+///
+/// Returns a value between 0.0 (all identical bytes) and 8.0 (perfectly random).
+///
+/// Interpretation for executable memory:
+///   0.0 – 5.0  Normal data, text, uninitialized memory
+///   5.0 – 6.5  Normal compiled code (.text sections, JIT output)
+///   6.5 – 7.0  Compressed data (embedded resources, zlib streams)
+///   7.0 – 7.7  Heavily compressed or lightly encrypted
+///   7.7 – 8.0  Almost certainly packed/encrypted (shellcode, crypted malware)
+pub fn shannon_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+
+    let mut freq = [0u64; 256];
+    for &byte in data {
+        freq[byte as usize] += 1;
+    }
+
+    let len = data.len() as f64;
+    let mut entropy = 0.0;
+    for &count in &freq {
+        if count > 0 {
+            let p = count as f64 / len;
+            entropy -= p * p.log2();
+        }
+    }
+    entropy
+}
+
+/// Entropy thresholds for classifying executable memory content
+pub const ENTROPY_PACKED_THRESHOLD: f64 = 7.7; // Encrypted/packed shellcode
+
+/// Walk the process tree from `pid` up to init (PID 1).
+///
+/// Returns a list of `(pid, comm)` pairs starting from the given process
+/// and walking up through parent processes. Useful for context in findings:
+/// "webserver → bash → curl" is suspicious regardless of allowlists.
+///
+/// Stops at PID 1, after 32 levels (infinite loop guard), or on error.
+pub fn get_process_lineage(pid: i32) -> Vec<(i32, String)> {
+    let mut chain = Vec::new();
+    let mut current_pid = pid;
+
+    for _ in 0..32 {
+        if current_pid <= 0 {
+            break;
+        }
+
+        let status_path = format!("/proc/{}/status", current_pid);
+        let content = match fs::read_to_string(&status_path) {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+
+        let mut name = String::new();
+        let mut ppid = 0i32;
+
+        for line in content.lines() {
+            if let Some(n) = line.strip_prefix("Name:\t") {
+                name = n.to_string();
+            } else if let Some(p) = line.strip_prefix("PPid:\t") {
+                ppid = p.trim().parse().unwrap_or(0);
+            }
+        }
+
+        chain.push((current_pid, name));
+
+        if current_pid == 1 || ppid == current_pid {
+            break;
+        }
+        current_pid = ppid;
+    }
+
+    chain
+}
+
+/// Format process lineage as a readable string: "bash(1234) → python3(5678) → curl(9012)"
+pub fn format_lineage(lineage: &[(i32, String)]) -> String {
+    lineage
+        .iter()
+        .map(|(pid, name)| format!("{}({})", name, pid))
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
