@@ -90,6 +90,9 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                     let content_lower = content.to_lowercase();
 
                     // Check for suspicious ExecStart commands
+                    // NOTE: "/bin/bash -c" is NOT suspicious — it's used by
+                    // many legitimate services (cloud-init, etc.). The truly
+                    // malicious patterns below already catch real backdoors.
                     let suspicious_commands = [
                         "curl",
                         "wget",
@@ -103,7 +106,6 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                         "/dev/shm",
                         "bash -i",
                         "sh -i",
-                        "/bin/bash -c",
                         "base64 -d",
                         "python -c",
                         "perl -e",
@@ -143,14 +145,25 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                         // Extract the command
                         for line in content.lines() {
                             if line.to_lowercase().starts_with("execstart=") {
-                                let cmd = line.split('=').nth(1).unwrap_or("");
+                                let cmd = line.split('=').nth(1).unwrap_or("").trim();
                                 let cmd_lower = cmd.to_lowercase();
 
+                                // Split binary from arguments — only check arguments
+                                // for network keywords. Checking the binary name causes
+                                // false positives (e.g., "rpcbind" contains "bind").
+                                let args_part = cmd_lower
+                                    .split_whitespace()
+                                    .skip(1)
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+
                                 // Network-facing services shouldn't run as root
-                                if cmd_lower.contains("listen")
-                                    || cmd_lower.contains("bind")
-                                    || cmd_lower.contains("serve")
-                                    || cmd_lower.contains("http")
+                                if args_part.contains("--listen")
+                                    || args_part.contains("--bind")
+                                    || args_part.contains("--serve")
+                                    || args_part.contains("--http")
+                                    || args_part.contains("-l ")
+                                    || args_part.ends_with("-l")
                                 {
                                     findings.push(
                                         Finding::medium(
@@ -159,7 +172,7 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                                             &format!(
                                                 "Service {} runs network command as root: {}",
                                                 file_path.display(),
-                                                cmd.trim()
+                                                cmd
                                             ),
                                         )
                                         .with_remediation(

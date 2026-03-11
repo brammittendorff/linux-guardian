@@ -493,19 +493,37 @@ pub async fn check_core_dumps() -> Result<Vec<Finding>> {
     if let Ok(core_pattern) = fs::read_to_string("/proc/sys/kernel/core_pattern") {
         let core_pattern = core_pattern.trim();
 
-        // Core dumps piped to a program can be dangerous
+        // Core dumps piped to a program — check if it's a known crash reporter
         if core_pattern.starts_with('|') {
-            findings.push(
-                Finding::medium(
-                    "core_pattern_piped",
-                    "Core Dumps Piped to Program",
-                    &format!(
-                        "Core pattern is set to pipe: '{}'. Could be exfiltrating crashes.",
-                        core_pattern
-                    ),
-                )
-                .with_remediation("Review: cat /proc/sys/kernel/core_pattern"),
-            );
+            // Known legitimate crash reporters
+            let known_reporters = [
+                "apport",           // Ubuntu/Debian
+                "abrt-hook-ccpp",   // RHEL/Fedora (ABRT)
+                "systemd-coredump", // systemd
+                "coredumpctl",      // systemd variant
+            ];
+
+            let is_known_reporter = known_reporters
+                .iter()
+                .any(|reporter| core_pattern.contains(reporter));
+
+            if is_known_reporter {
+                debug!("Core pattern uses known crash reporter: {}", core_pattern);
+            } else {
+                findings.push(
+                    Finding::high(
+                        "core_pattern_piped",
+                        "Core Dumps Piped to Unknown Program",
+                        &format!(
+                            "Core pattern pipes crashes to an unrecognized program: '{}'. \
+                             Known reporters (apport, abrt, systemd-coredump) are not detected. \
+                             This could be exfiltrating crash data.",
+                            core_pattern
+                        ),
+                    )
+                    .with_remediation("Review: cat /proc/sys/kernel/core_pattern — verify the program is legitimate"),
+                );
+            }
         }
     }
 
