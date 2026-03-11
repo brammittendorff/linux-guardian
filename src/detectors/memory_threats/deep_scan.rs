@@ -292,10 +292,7 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
 
         // Skip binaries with text relocations (TEXTREL) — .text is legitimately modified
         if text_info.has_textrel {
-            debug!(
-                "Skipping {} (PID: {}) — has DT_TEXTREL",
-                comm, pid
-            );
+            debug!("Skipping {} (PID: {}) — has DT_TEXTREL", comm, pid);
             continue;
         }
 
@@ -322,8 +319,7 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
         // find_text_mapping already guarantees that text_info.file_offset falls within
         // [mapping.file_offset, mapping.file_offset + mapping_size), so the subtraction
         // cannot underflow.
-        let mem_text_addr =
-            text_mapping.start + (text_info.file_offset - text_mapping.file_offset);
+        let mem_text_addr = text_mapping.start + (text_info.file_offset - text_mapping.file_offset);
 
         // Read the .text section from memory (limit to 1MB for performance)
         let read_size = text_info.size.min(1024 * 1024) as usize;
@@ -333,11 +329,7 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
         };
 
         // Read the .text section from the namespace-correct on-disk binary
-        let disk_text = match read_file_range(
-            &disk_binary_path,
-            text_info.file_offset,
-            read_size,
-        ) {
+        let disk_text = match read_file_range(&disk_binary_path, text_info.file_offset, read_size) {
             Ok(d) => d,
             Err(_) => continue,
         };

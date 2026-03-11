@@ -49,22 +49,37 @@ fn is_jit_compiler(maps_content: &str, process_name: &str, anonymous_rwx_count: 
 
     // Generic heuristic 1: Check for JIT-specific library/file patterns in maps
     let jit_indicators = [
-        "v8_context_snapshot", "snapshot_blob", "icudtl.dat", // V8/Chromium
-        ".node",               // Node.js native modules
-        "jvm", "jre", "hotspot", "coreclr", // Java/.NET JIT
-        "mozjs", "spidermonkey", "libmozjs", // Mozilla SpiderMonkey
-        "javascriptcore", "libjavascriptcoregtk", "libjsc", // WebKit JSC
-        "luajit",              // LuaJIT
-        "pypy",                // PyPy JIT
-        "mono", "dotnet",      // .NET runtime
-        "qemu",                // QEMU dynamic binary translation
-        "wasm", "wasmtime", "wasmer", "cranelift", // WebAssembly
-        "libffi",              // Foreign function interface (creates trampolines)
-        "libpcre2-8", "libpcre2-jit", // PCRE2 regex JIT
-        "liborc",              // GStreamer ORC JIT
-        "libllvm", "libLLVM",  // LLVM (used by PostgreSQL JIT, Julia, etc.)
-        "graalvm",             // GraalVM polyglot JIT
-        "beamasm",             // Erlang/OTP BeamAsm JIT
+        "v8_context_snapshot",
+        "snapshot_blob",
+        "icudtl.dat", // V8/Chromium
+        ".node",      // Node.js native modules
+        "jvm",
+        "jre",
+        "hotspot",
+        "coreclr", // Java/.NET JIT
+        "mozjs",
+        "spidermonkey",
+        "libmozjs", // Mozilla SpiderMonkey
+        "javascriptcore",
+        "libjavascriptcoregtk",
+        "libjsc", // WebKit JSC
+        "luajit", // LuaJIT
+        "pypy",   // PyPy JIT
+        "mono",
+        "dotnet", // .NET runtime
+        "qemu",   // QEMU dynamic binary translation
+        "wasm",
+        "wasmtime",
+        "wasmer",
+        "cranelift", // WebAssembly
+        "libffi",    // Foreign function interface (creates trampolines)
+        "libpcre2-8",
+        "libpcre2-jit", // PCRE2 regex JIT
+        "liborc",       // GStreamer ORC JIT
+        "libllvm",
+        "libLLVM", // LLVM (used by PostgreSQL JIT, Julia, etc.)
+        "graalvm", // GraalVM polyglot JIT
+        "beamasm", // Erlang/OTP BeamAsm JIT
     ];
 
     for indicator in &jit_indicators {
@@ -76,32 +91,95 @@ fn is_jit_compiler(maps_content: &str, process_name: &str, anonymous_rwx_count: 
     // Generic heuristic 2: Process names known to use JIT
     let jit_process_patterns = [
         // Browsers
-        "chrome", "chromium", "firefox", "brave", "vivaldi", "opera",
-        "msedge", "epiphany", "falkon", "thunderbird",
+        "chrome",
+        "chromium",
+        "firefox",
+        "brave",
+        "vivaldi",
+        "opera",
+        "msedge",
+        "epiphany",
+        "falkon",
+        "thunderbird",
         // Electron/CEF
-        "electron", "code", "discord", "slack", "teams", "spotify",
-        "signal", "obsidian", "notion", "figma", "1password", "bitwarden",
-        "postman", "cursor", "element", "hyper", "tabby",
+        "electron",
+        "code",
+        "discord",
+        "slack",
+        "teams",
+        "spotify",
+        "signal",
+        "obsidian",
+        "notion",
+        "figma",
+        "1password",
+        "bitwarden",
+        "postman",
+        "cursor",
+        "element",
+        "hyper",
+        "tabby",
         // JS runtimes
-        "node", "deno", "bun",
+        "node",
+        "deno",
+        "bun",
         // Language runtimes
-        "java", "python", "ruby", "pypy", "luajit", "php",
-        "dotnet", "mono", "julia", "dart", "erlang", "beam.smp",
-        "elixir", "guile", "racket", "sbcl", "gjs", "cjs",
+        "java",
+        "python",
+        "ruby",
+        "pypy",
+        "luajit",
+        "php",
+        "dotnet",
+        "mono",
+        "julia",
+        "dart",
+        "erlang",
+        "beam.smp",
+        "elixir",
+        "guile",
+        "racket",
+        "sbcl",
+        "gjs",
+        "cjs",
         // JVM tools
-        "idea", "pycharm", "clion", "goland", "webstorm", "eclipse",
-        "gradle", "mvn", "bazel",
+        "idea",
+        "pycharm",
+        "clion",
+        "goland",
+        "webstorm",
+        "eclipse",
+        "gradle",
+        "mvn",
+        "bazel",
         // Databases with JIT
-        "postgres", "clickhouse",
+        "postgres",
+        "clickhouse",
         // Emulators
-        "qemu", "dolphin-emu", "pcsx2", "rpcs3", "ppsspp", "retroarch",
-        "dosbox", "wine", "wine64", "proton", "box86", "box64",
+        "qemu",
+        "dolphin-emu",
+        "pcsx2",
+        "rpcs3",
+        "ppsspp",
+        "retroarch",
+        "dosbox",
+        "wine",
+        "wine64",
+        "proton",
+        "box86",
+        "box64",
         // Virtualization
-        "virtualbox", "vmware",
+        "virtualbox",
+        "vmware",
         // Desktop with JS engines
-        "gnome-shell", "cinnamon", "blender", "obs",
+        "gnome-shell",
+        "cinnamon",
+        "blender",
+        "obs",
         // Debuggers
-        "gdb", "lldb", "valgrind",
+        "gdb",
+        "lldb",
+        "valgrind",
     ];
 
     for pattern in &jit_process_patterns {

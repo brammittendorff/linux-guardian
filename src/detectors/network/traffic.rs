@@ -230,6 +230,47 @@ pub(super) fn detect_data_exfiltration(snapshot: &ConnectionSnapshot) -> Option<
     None
 }
 
+/// Check if a beaconing pattern is from a known benign source.
+/// Returns the reason string if benign, None if suspicious.
+fn benign_beaconing_reason(snapshot: &ConnectionSnapshot) -> Option<&'static str> {
+    // Google Cast / Chromecast protocol (port 8009)
+    // Chrome regularly heartbeats to Cast-compatible devices
+    if snapshot.remote_port == 8009
+        && (snapshot.process_name.contains("chrome") || snapshot.process_name.contains("chromium"))
+    {
+        return Some("Google Cast / Chromecast heartbeat (port 8009)");
+    }
+
+    // mDNS discovery (port 5353)
+    if snapshot.remote_port == 5353 {
+        return Some("mDNS service discovery (port 5353)");
+    }
+
+    // SSDP / UPnP discovery (port 1900)
+    if snapshot.remote_port == 1900 {
+        return Some("SSDP/UPnP device discovery (port 1900)");
+    }
+
+    None
+}
+
+/// Check if a process is still alive and matches the expected binary
+fn is_process_alive(pid: i32, expected_name: &str) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+
+    let exe_path = format!("/proc/{}/exe", pid);
+    match fs::read_link(&exe_path) {
+        Ok(actual_exe) => {
+            let actual = actual_exe.to_string_lossy();
+            // Check that the process binary still matches what we recorded
+            actual.contains(expected_name) || expected_name.contains(&*actual)
+        }
+        Err(_) => false, // Process is dead or we can't read it
+    }
+}
+
 /// Detect beaconing patterns (C2 communication)
 pub(super) fn detect_beaconing_patterns(
     history: &HashMap<String, ConnectionHistory>,
@@ -281,7 +322,44 @@ pub(super) fn detect_beaconing_patterns(
         if regularity_score > MIN_REGULARITY
             && (MIN_INTERVAL..=MAX_INTERVAL).contains(&avg_interval)
         {
-            let snapshot = &conn_history.snapshots[0];
+            // Use the most recent snapshot for validation
+            let snapshot = conn_history
+                .snapshots
+                .last()
+                .unwrap_or(&conn_history.snapshots[0]);
+
+            // Known benign beaconing (e.g. Chromecast on port 8009) — report as
+            // informational instead of critical so the user is still aware
+            if let Some(reason) = benign_beaconing_reason(snapshot) {
+                findings.push(
+                    Finding::low(
+                        "benign_beaconing",
+                        "Known Beaconing Pattern",
+                        &format!(
+                            "Process '{}' (PID {}) shows regular beaconing to {}:{} every {:.1} seconds. \
+                             Regularity: {:.0}%. Likely cause: {}.",
+                            snapshot.process_name,
+                            snapshot.pid,
+                            snapshot.remote_addr,
+                            snapshot.remote_port,
+                            avg_interval,
+                            regularity_score * 100.0,
+                            reason,
+                        ),
+                    )
+                    .with_remediation("No action needed — this is expected behavior. Investigate only if the destination IP is unfamiliar."),
+                );
+                continue;
+            }
+
+            // Verify the process is still alive and matches the expected binary
+            if !is_process_alive(snapshot.pid, &snapshot.process_name) {
+                debug!(
+                    "Skipping beaconing alert for dead process '{}' (PID {})",
+                    snapshot.process_name, snapshot.pid
+                );
+                continue;
+            }
 
             findings.push(
                 Finding::critical(

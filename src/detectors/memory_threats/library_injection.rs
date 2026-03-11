@@ -1,6 +1,7 @@
 use crate::models::Finding;
 use anyhow::Result;
 use procfs::process::all_processes;
+use std::collections::HashSet;
 use std::fs;
 use tracing::{debug, info};
 
@@ -186,6 +187,9 @@ fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
 
     let suspicious_paths = ["/tmp/", "/dev/shm/", "/var/tmp/"];
 
+    // Deduplicate: only report each unique library path once per process
+    let mut seen_libraries = HashSet::new();
+
     for line in maps.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 6 {
@@ -193,6 +197,11 @@ fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
         }
 
         let path = parts[5..].join(" ");
+
+        // Skip if we already reported this library for this process
+        if !seen_libraries.insert(path.clone()) {
+            continue;
+        }
 
         // Check for shared libraries loaded from suspicious locations
         if path.ends_with(".so") || path.contains(".so.") {
@@ -218,24 +227,221 @@ fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
         }
 
         // Check for deleted shared libraries (injected then removed)
-        if (path.ends_with(".so (deleted)") || path.contains(".so.") && path.contains("(deleted)"))
-            && !path.contains("/usr/")
-            && !path.contains("/lib/")
-        {
-            findings.push(
-                Finding::high(
-                    "library_injection",
-                    "Deleted Shared Library Still Loaded",
-                    &format!(
-                        "Process '{}' (PID: {}) has a deleted library still mapped: {}",
-                        comm, pid, path
-                    ),
-                )
-                .with_remediation(&format!(
-                    "Investigate process: sudo kill -9 {} if suspicious",
-                    pid
-                )),
-            );
+        if !is_deleted_shared_library(&path) {
+            continue;
         }
+
+        // Strip " (deleted)" suffix to get the original path
+        let original_path = path.strip_suffix(" (deleted)").unwrap_or(&path);
+
+        // Determine WHY the library was deleted — this distinguishes
+        // "app updated and old .so was replaced" from "injected .so was
+        // deleted to cover tracks"
+        let deletion_reason = classify_deleted_library(original_path, pid);
+
+        match deletion_reason {
+            DeletedLibraryReason::ReplacedByUpdate => {
+                // A newer version of the file exists at the same path.
+                // This is normal after package/app updates — the running
+                // process still maps the old (now unlinked) inode while
+                // the new version sits on disk.
+                debug!(
+                    "Deleted library '{}' in process '{}' (PID {}) was replaced by update — benign",
+                    original_path, comm, pid
+                );
+            }
+            DeletedLibraryReason::PackageManaged => {
+                // The file is gone but the package manager owns that path.
+                // Likely mid-update or the process just needs a restart.
+                findings.push(
+                    Finding::low(
+                        "library_stale",
+                        "Process Using Outdated Library",
+                        &format!(
+                            "Process '{}' (PID {}) still maps deleted library '{}' which is \
+                             package-managed. The package was likely updated — restart the \
+                             process to load the new version.",
+                            comm, pid, original_path
+                        ),
+                    )
+                    .with_remediation(&format!(
+                        "Restart the process to pick up the updated library. Check: dpkg -S '{}'",
+                        original_path
+                    )),
+                );
+            }
+            DeletedLibraryReason::ProcessExeDirectory => {
+                // The deleted lib lived in the same directory as the
+                // process executable.  This strongly suggests the
+                // application itself was updated (e.g. Chrome, VS Code,
+                // Electron apps).
+                findings.push(
+                    Finding::low(
+                        "library_stale",
+                        "Process Using Outdated Library (App Update)",
+                        &format!(
+                            "Process '{}' (PID {}) still maps deleted library '{}'. \
+                             The library was in the application's own directory, suggesting \
+                             the application was updated while running.",
+                            comm, pid, original_path
+                        ),
+                    )
+                    .with_remediation("Restart the application to load updated libraries"),
+                );
+            }
+            DeletedLibraryReason::SuspiciousLocation => {
+                // Library was loaded from /tmp, /dev/shm, etc. and then
+                // deleted — classic injection-then-cleanup pattern.
+                findings.push(
+                    Finding::critical(
+                        "library_injection",
+                        "Deleted Injected Library (Suspicious Location)",
+                        &format!(
+                            "Process '{}' (PID {}) has a deleted library mapped from a \
+                             suspicious location: '{}'. Loading a library from a temporary \
+                             directory and then deleting it is a common code injection technique.",
+                            comm, pid, original_path
+                        ),
+                    )
+                    .with_remediation(&format!(
+                        "URGENT: Investigate process: sudo ls -la /proc/{}/exe && \
+                         sudo cat /proc/{}/maps | grep deleted && \
+                         sudo kill -9 {} if confirmed malicious",
+                        pid, pid, pid
+                    )),
+                );
+            }
+            DeletedLibraryReason::TrulyDeleted => {
+                // File is gone, no replacement, not package-managed, not
+                // from the app's own dir — genuinely suspicious.
+                findings.push(
+                    Finding::high(
+                        "library_injection",
+                        "Deleted Shared Library Still Loaded",
+                        &format!(
+                            "Process '{}' (PID {}) has a deleted library still mapped: '{}'. \
+                             The file no longer exists on disk and is not package-managed. \
+                             This may indicate code injection with post-cleanup.",
+                            comm, pid, original_path
+                        ),
+                    )
+                    .with_remediation(&format!(
+                        "Investigate: sudo cat /proc/{}/maps | grep deleted && \
+                         sudo kill -9 {} if suspicious",
+                        pid, pid
+                    )),
+                );
+            }
+        }
+    }
+}
+
+/// Why a deleted library was deleted
+enum DeletedLibraryReason {
+    /// A newer file exists at the same path (app/package was updated)
+    ReplacedByUpdate,
+    /// File is gone but the package manager owns that path
+    PackageManaged,
+    /// File lived in the same directory as the process executable
+    ProcessExeDirectory,
+    /// File was in /tmp, /dev/shm, or similar — classic injection cleanup
+    SuspiciousLocation,
+    /// File is truly gone with no obvious benign explanation
+    TrulyDeleted,
+}
+
+/// Check if a map entry is a deleted shared library
+fn is_deleted_shared_library(path: &str) -> bool {
+    if !path.contains("(deleted)") {
+        return false;
+    }
+    // Must be a .so file
+    if !path.contains(".so") {
+        return false;
+    }
+    // Skip system library paths — handled by package manager, low risk
+    if path.starts_with("/usr/lib") || path.starts_with("/lib/") || path.starts_with("/lib64/") {
+        return false;
+    }
+    true
+}
+
+/// Classify why a deleted library was deleted to distinguish updates from injection
+fn classify_deleted_library(original_path: &str, pid: i32) -> DeletedLibraryReason {
+    use std::path::Path;
+
+    let suspicious_dirs = ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/user/"];
+
+    // 1. If loaded from a suspicious temp directory, flag immediately
+    for dir in &suspicious_dirs {
+        if original_path.starts_with(dir) {
+            return DeletedLibraryReason::SuspiciousLocation;
+        }
+    }
+
+    // 2. If a file still exists at the same path, it was replaced (update)
+    if Path::new(original_path).exists() {
+        return DeletedLibraryReason::ReplacedByUpdate;
+    }
+
+    // 3. Check if the deleted lib was in the same directory as the process
+    //    executable — strong signal of an application self-update
+    let exe_link = format!("/proc/{}/exe", pid);
+    if let Ok(exe_path) = fs::read_link(&exe_link) {
+        if let (Some(exe_dir), Some(lib_dir)) = (
+            exe_path.parent().and_then(|p| p.to_str()),
+            Path::new(original_path).parent().and_then(|p| p.to_str()),
+        ) {
+            // Check if the library is under the same base application directory
+            // e.g. exe=/opt/google/chrome/chrome, lib=/opt/google/chrome/WidevineCdm/...
+            // Both share /opt/google/chrome/
+            let exe_base = get_app_base_dir(exe_dir);
+            let lib_base = get_app_base_dir(lib_dir);
+            if exe_base == lib_base && !exe_base.is_empty() {
+                return DeletedLibraryReason::ProcessExeDirectory;
+            }
+        }
+    }
+
+    // 4. Check if the package manager knows about this file path
+    if is_package_managed(original_path) {
+        return DeletedLibraryReason::PackageManaged;
+    }
+
+    // 5. None of the above — genuinely suspicious
+    DeletedLibraryReason::TrulyDeleted
+}
+
+/// Get the base application directory (first 3-4 path components for /opt, /snap, etc.)
+fn get_app_base_dir(dir: &str) -> &str {
+    // For paths like /opt/google/chrome/subdir, return /opt/google/chrome
+    // For paths like /snap/foo/123/usr/lib, return /snap/foo/123
+    let parts: Vec<usize> = dir.match_indices('/').map(|(i, _)| i).collect();
+
+    // /opt/vendor/app -> 3 components
+    // /snap/name/rev -> 3 components
+    let depth = if dir.starts_with("/opt/") || dir.starts_with("/snap/") {
+        3
+    } else {
+        2
+    };
+
+    if parts.len() > depth {
+        &dir[..parts[depth]]
+    } else {
+        dir
+    }
+}
+
+/// Check if a file path is managed by dpkg (Debian/Ubuntu)
+fn is_package_managed(path: &str) -> bool {
+    // Use dpkg -S to check if the package manager knows this file
+    // This is fast for single lookups (searches dpkg's database file)
+    match std::process::Command::new("dpkg")
+        .args(["-S", path])
+        .output()
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false, // dpkg not available (not Debian-based)
     }
 }

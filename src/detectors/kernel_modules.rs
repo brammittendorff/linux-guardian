@@ -203,14 +203,28 @@ pub async fn detect_kernel_modules() -> Result<Vec<Finding>> {
 /// Hardware/driver modules whose debug parameters are normal and expected.
 /// These are not rootkits — flagging them wastes the user's time.
 const SAFE_DEBUG_MODULES: &[&str] = &[
-    "amdgpu", "i915", "nouveau", "radeon",    // GPU drivers
-    "iwlwifi", "ath10k", "ath11k", "mt76",    // WiFi drivers
-    "snd_hda_intel", "snd_hda_core",          // Audio drivers
-    "usbcore", "xhci_hcd", "ehci_hcd",        // USB controllers
-    "nvme", "ahci", "sd_mod",                 // Storage drivers
-    "drm", "drm_kms_helper",                  // Display framework
-    "bluetooth", "btusb",                     // Bluetooth
-    "cfg80211", "mac80211",                   // Wireless framework
+    "amdgpu",
+    "i915",
+    "nouveau",
+    "radeon", // GPU drivers
+    "iwlwifi",
+    "ath10k",
+    "ath11k",
+    "mt76", // WiFi drivers
+    "snd_hda_intel",
+    "snd_hda_core", // Audio drivers
+    "usbcore",
+    "xhci_hcd",
+    "ehci_hcd", // USB controllers
+    "nvme",
+    "ahci",
+    "sd_mod", // Storage drivers
+    "drm",
+    "drm_kms_helper", // Display framework
+    "bluetooth",
+    "btusb", // Bluetooth
+    "cfg80211",
+    "mac80211", // Wireless framework
 ];
 
 /// Check for suspicious module parameters (can enable rootkit features)

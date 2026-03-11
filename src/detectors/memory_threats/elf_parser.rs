@@ -1,8 +1,8 @@
 use super::utils::parse_address_range;
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use sha2::{Digest, Sha256};
 
 /// Info about the .text section parsed from an ELF binary
 pub(super) struct TextSectionInfo {
@@ -177,7 +177,11 @@ pub(super) fn parse_elf_text_section(path: &std::path::Path) -> Option<TextSecti
 ///
 /// The `?` operator is intentionally NOT used on per-line parsing so that a
 /// malformed line does not abort the entire search.
-pub(super) fn find_text_mapping(maps: &str, exe_path: &str, text_file_offset: u64) -> Option<MappingInfo> {
+pub(super) fn find_text_mapping(
+    maps: &str,
+    exe_path: &str,
+    text_file_offset: u64,
+) -> Option<MappingInfo> {
     for line in maps.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 6 {
@@ -212,13 +216,8 @@ pub(super) fn find_text_mapping(maps: &str, exe_path: &str, text_file_offset: u6
         // The virtual size of an r-xp segment equals its file coverage (no BSS
         // zero-fill in executable segments), so mapping_size is the correct span.
         let mapping_size = end - start;
-        if text_file_offset >= file_offset
-            && text_file_offset < file_offset + mapping_size
-        {
-            return Some(MappingInfo {
-                start,
-                file_offset,
-            });
+        if text_file_offset >= file_offset && text_file_offset < file_offset + mapping_size {
+            return Some(MappingInfo { start, file_offset });
         }
     }
 
@@ -226,11 +225,7 @@ pub(super) fn find_text_mapping(maps: &str, exe_path: &str, text_file_offset: u6
 }
 
 /// Read a range of bytes from a file
-pub(super) fn read_file_range(
-    path: &std::path::Path,
-    offset: u64,
-    size: usize,
-) -> Result<Vec<u8>> {
+pub(super) fn read_file_range(path: &std::path::Path, offset: u64, size: usize) -> Result<Vec<u8>> {
     let mut file = fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0u8; size];

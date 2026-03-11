@@ -337,8 +337,12 @@ fn grab_banner(port: u16) -> Option<String> {
     // Connect to localhost directly — no need to enumerate all local IPs
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
 
     // Read banner (some services send immediately)
     let mut buffer = [0u8; 1024];

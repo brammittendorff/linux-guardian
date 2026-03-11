@@ -21,78 +21,63 @@ use tracing::{debug, info};
 /// Pygmy Goat, XorDdos, and the chkrootkit/rkhunter reference lists.
 const CRITICAL_BINARIES: &[&str] = &[
     // --- Authentication & privilege escalation ---
-    "/usr/bin/sudo",  // sudo is actually in /usr/bin
-    "/bin/su",        // Tracked in /bin by dpkg
+    "/usr/bin/sudo", // sudo is actually in /usr/bin
+    "/bin/su",       // Tracked in /bin by dpkg
     "/usr/bin/passwd",
-    "/bin/login",     // Tracked in /bin by dpkg
-    "/usr/bin/chfn",  // SUID binary, classic rootkit target
-    "/usr/bin/chsh",  // SUID binary, classic rootkit target
-
+    "/bin/login",    // Tracked in /bin by dpkg
+    "/usr/bin/chfn", // SUID binary, classic rootkit target
+    "/usr/bin/chsh", // SUID binary, classic rootkit target
     // --- Shells ---
     "/bin/bash",
     "/bin/sh",
-
     // --- Remote access & file transfer ---
     "/usr/bin/ssh",
     "/usr/sbin/sshd",
-    "/usr/bin/scp",   // Exfiltrate files
-    "/usr/bin/curl",  // Download payloads (perfctl, XorDdos)
-    "/usr/bin/wget",  // Download payloads
-
+    "/usr/bin/scp",  // Exfiltrate files
+    "/usr/bin/curl", // Download payloads (perfctl, XorDdos)
+    "/usr/bin/wget", // Download payloads
     // --- Process & system monitoring ---
-    "/bin/ps",        // Tracked in /bin by dpkg
-    "/bin/ls",        // Tracked in /bin by dpkg
-    "/bin/systemctl", // Tracked in /bin by dpkg
-    "/usr/bin/top",   // Hide cryptominer CPU usage
+    "/bin/ps",         // Tracked in /bin by dpkg
+    "/bin/ls",         // Tracked in /bin by dpkg
+    "/bin/systemctl",  // Tracked in /bin by dpkg
+    "/usr/bin/top",    // Hide cryptominer CPU usage
     "/usr/bin/pstree", // Hide process trees
-    "/usr/bin/lsof",  // Hide open files/connections
-    "/usr/bin/find",  // Prevent discovery of malware files
-    "/usr/bin/w",     // Hide logged-in attackers
-
+    "/usr/bin/lsof",   // Hide open files/connections
+    "/usr/bin/find",   // Prevent discovery of malware files
+    "/usr/bin/w",      // Hide logged-in attackers
     // --- File & disk inspection ---
-    "/usr/bin/du",    // Hide disk usage of malicious files
-    "/usr/bin/df",    // Hide filesystem usage
-
+    "/usr/bin/du", // Hide disk usage of malicious files
+    "/usr/bin/df", // Hide filesystem usage
     // --- Text & binary analysis ---
-    "/usr/bin/grep",  // Filter out evidence from command output
-    "/usr/bin/ldd",   // Hide malicious library injections (perfctl)
-
+    "/usr/bin/grep", // Filter out evidence from command output
+    "/usr/bin/ldd",  // Hide malicious library injections (perfctl)
     // --- Scheduling & persistence ---
     "/usr/bin/crontab", // Hide persistence mechanisms (perfctl)
     "/usr/sbin/cron",   // Hide cron-based backdoors
-
     // --- Network utilities ---
     "/bin/netstat",
-    "/usr/bin/ss",       // iproute2 package
+    "/usr/bin/ss",        // iproute2 package
     "/usr/sbin/ifconfig", // Hide promiscuous mode (Pygmy Goat)
-    "/usr/sbin/ip",      // Modern ifconfig replacement
-    "/usr/bin/tcpdump",  // Modified to capture/exfiltrate traffic
-
+    "/usr/sbin/ip",       // Modern ifconfig replacement
+    "/usr/bin/tcpdump",   // Modified to capture/exfiltrate traffic
     // --- Filesystem & mounting ---
-    "/usr/bin/mount",    // Mount attacker-controlled filesystems
-
+    "/usr/bin/mount", // Mount attacker-controlled filesystems
     // --- Firewall & network filtering ---
     "/usr/sbin/iptables", // Open firewall holes
     "/usr/sbin/nft",      // Modern nftables firewall
-
     // --- Kernel module loading ---
     "/usr/sbin/modprobe", // Load kernel rootkit modules
     "/usr/sbin/insmod",   // Load kernel rootkit modules directly
-
     // --- Dynamic linker & library management ---
     "/usr/sbin/ldconfig", // Inject malicious library search paths
-
     // --- Environment manipulation ---
-    "/usr/bin/env",       // Inject environment variables into processes
-
+    "/usr/bin/env", // Inject environment variables into processes
     // --- Package management ---
-    "/usr/bin/dpkg",      // Hide tampered packages (Debian/Ubuntu)
-    "/usr/bin/rpm",       // Hide tampered packages (RPM-based systems)
-
+    "/usr/bin/dpkg", // Hide tampered packages (Debian/Ubuntu)
+    "/usr/bin/rpm",  // Hide tampered packages (RPM-based systems)
     // --- User account management ---
-    "/usr/sbin/adduser",  // Create backdoor accounts
-    "/usr/sbin/useradd",  // Create backdoor accounts (low-level)
-
+    "/usr/sbin/adduser", // Create backdoor accounts
+    "/usr/sbin/useradd", // Create backdoor accounts (low-level)
     // --- Interpreters & runtimes (common execution targets) ---
     // NOTE: JIT processes are excluded from .text section comparison in the
     // process hollowing detector (deep_scan.rs) to avoid false positives, but
@@ -104,26 +89,22 @@ const CRITICAL_BINARIES: &[&str] = &[
     "/usr/bin/firefox",
     "/usr/bin/firefox-esr",
     "/usr/bin/brave-browser",
-
     // JavaScript runtimes (common malware execution vectors)
     "/usr/bin/node",
     "/usr/bin/nodejs",
     "/usr/bin/deno",
     "/usr/bin/bun",
-
     // Language runtimes (arbitrary code execution targets)
     "/usr/bin/python3",
-    "/usr/bin/python3.11",  // Common on Debian/Ubuntu 22.04+
+    "/usr/bin/python3.11", // Common on Debian/Ubuntu 22.04+
     "/usr/bin/java",
     "/usr/bin/ruby",
     "/usr/bin/php",
     "/usr/bin/perl",
     "/usr/bin/lua",
     "/usr/bin/luajit",
-
     // .NET runtime
     "/usr/bin/dotnet",
-
     // --- Databases (data theft targets) ---
     "/usr/bin/psql",         // PostgreSQL client
     "/usr/sbin/postgres",    // PostgreSQL server daemon
