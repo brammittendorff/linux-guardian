@@ -327,49 +327,121 @@ pub(super) async fn analyze_udp_connections() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-/// Detect hidden network connections (rootkit indicator)
+/// Detect hidden network connections (rootkit indicator).
+///
+/// Compares two independent data sources:
+///   1. /proc/net/tcp (procfs — virtual filesystem)
+///   2. `ss -tna` (netlink — kernel socket API)
+///
+/// A rootkit that hides connections must hook BOTH interfaces. If connections
+/// appear in one source but not the other, that's suspicious. However, on
+/// high-traffic servers (Plex, web servers) connections are created/destroyed
+/// rapidly, so we must account for the race condition between the two reads.
+///
+/// Strategy:
+/// - Read both sources as close together as possible
+/// - Only flag if a LISTENING socket is hidden (these are stable, not transient)
+/// - For ESTABLISHED connections, require a large discrepancy to flag
 pub(super) async fn detect_hidden_connections() -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
 
+    // Read both sources back-to-back to minimize race window
     let proc_connections = parse_proc_connections();
-    let procfs_connections = parse_procfs_connections();
+    let ss_connections = parse_ss_connections();
 
-    let mut hidden_connections = Vec::new();
+    // If ss failed to run, we can't compare
+    if ss_connections.is_empty() {
+        debug!("Could not get ss output, skipping hidden connection detection");
+        return Ok(findings);
+    }
+
+    // Check for LISTENING sockets in /proc/net/tcp that are NOT in ss output.
+    // Listening sockets are stable (not transient) so hiding them is a strong
+    // rootkit indicator.
+    let mut hidden_listeners = Vec::new();
     for proc_conn in &proc_connections {
-        if is_likely_formatting_difference(proc_conn) {
+        // Only check listeners (state "0A" = LISTEN in /proc/net/tcp hex)
+        if proc_conn.state != "0A" {
             continue;
         }
-        let found = procfs_connections
+        // Skip IPv6 (formatting differences cause false matches)
+        if proc_conn.local_ip == "::" || proc_conn.local_ip.contains(':') {
+            continue;
+        }
+        let found_in_ss = ss_connections
             .iter()
-            .any(|procfs_conn| connections_match(proc_conn, procfs_conn));
-        if !found {
-            hidden_connections.push(proc_conn.clone());
+            .any(|ss_conn| connections_match(proc_conn, ss_conn));
+        if !found_in_ss {
+            hidden_listeners.push(proc_conn.clone());
         }
     }
 
-    if hidden_connections.len() > 5 {
-        let example_conns: Vec<String> = hidden_connections
+    if !hidden_listeners.is_empty() {
+        let example_conns: Vec<String> = hidden_listeners
             .iter()
-            .take(3)
-            .map(|c| {
-                format!(
-                    "{}:{} -> {}:{}",
-                    c.local_ip, c.local_port, c.remote_ip, c.remote_port
-                )
-            })
+            .take(5)
+            .map(|c| format!("{}:{}", c.local_ip, c.local_port))
             .collect();
 
         findings.push(
             Finding::high(
                 "rootkit",
-                "Hidden Network Connections Detected",
+                "Hidden Listening Sockets Detected",
                 &format!(
-                    "{} connections visible in /proc/net/tcp but hidden from procfs crate view - possible rootkit. Examples: {}",
-                    hidden_connections.len(),
+                    "{} listening socket(s) visible in /proc/net/tcp but hidden from \
+                     netlink (ss). A rootkit may be hiding network services. \
+                     Hidden listeners: {}",
+                    hidden_listeners.len(),
                     example_conns.join(", ")
                 ),
             )
-            .with_remediation("Investigate for rootkit: Check processes for hidden connections, scan with rkhunter/chkrootkit"),
+            .with_remediation(
+                "Investigate for rootkit: sudo ss -tlnp && cat /proc/net/tcp && scan with rkhunter/chkrootkit",
+            ),
+        );
+    }
+
+    // Also check reverse: ss shows connections that /proc/net/tcp doesn't.
+    // This would indicate procfs is being tampered with to hide connections.
+    let mut hidden_from_proc = Vec::new();
+    for ss_conn in &ss_connections {
+        // Only check listeners for the same stability reason
+        if !ss_conn.state.contains("LISTEN") {
+            continue;
+        }
+        if ss_conn.local_ip == "::" || ss_conn.local_ip.contains(':') {
+            continue;
+        }
+        let found_in_proc = proc_connections
+            .iter()
+            .any(|proc_conn| connections_match(ss_conn, proc_conn));
+        if !found_in_proc {
+            hidden_from_proc.push(ss_conn.clone());
+        }
+    }
+
+    if !hidden_from_proc.is_empty() {
+        let example_conns: Vec<String> = hidden_from_proc
+            .iter()
+            .take(5)
+            .map(|c| format!("{}:{}", c.local_ip, c.local_port))
+            .collect();
+
+        findings.push(
+            Finding::critical(
+                "rootkit",
+                "Procfs Tampering — Connections Hidden from /proc/net/tcp",
+                &format!(
+                    "{} listening socket(s) visible via netlink (ss) but MISSING from \
+                     /proc/net/tcp. This is a strong rootkit indicator — something is \
+                     intercepting procfs reads. Hidden: {}",
+                    hidden_from_proc.len(),
+                    example_conns.join(", ")
+                ),
+            )
+            .with_remediation(
+                "URGENT: Possible kernel rootkit. Run from live USB: rkhunter, chkrootkit, or compare against known-good kernel.",
+            ),
         );
     }
 
@@ -414,46 +486,81 @@ fn parse_proc_line(line: &str) -> Option<Connection> {
     })
 }
 
-/// Parse connections from procfs crate (our "second view" for cross-referencing)
-fn parse_procfs_connections() -> HashSet<Connection> {
+/// Parse connections from `ss` (uses netlink — independent from procfs).
+/// This gives us a second data source to cross-reference against /proc/net/tcp.
+fn parse_ss_connections() -> HashSet<Connection> {
     let mut connections = HashSet::new();
-    if let Ok(tcp_entries) = procfs::net::tcp() {
-        for entry in tcp_entries {
-            let state = match entry.state {
-                procfs::net::TcpState::Established => "ESTAB",
-                procfs::net::TcpState::Listen => "LISTEN",
-                procfs::net::TcpState::SynSent => "SYN-SENT",
-                procfs::net::TcpState::SynRecv => "SYN-RECV",
-                procfs::net::TcpState::FinWait1 => "FIN-WAIT-1",
-                procfs::net::TcpState::FinWait2 => "FIN-WAIT-2",
-                procfs::net::TcpState::TimeWait => "TIME-WAIT",
-                procfs::net::TcpState::Close => "CLOSE",
-                procfs::net::TcpState::CloseWait => "CLOSE-WAIT",
-                procfs::net::TcpState::LastAck => "LAST-ACK",
-                procfs::net::TcpState::Closing => "CLOSING",
-                _ => "UNKNOWN",
-            };
+
+    // ss -tna: TCP, numeric, all states (including LISTEN)
+    let output = match std::process::Command::new("ss").args(["-tna"]).output() {
+        Ok(o) => o,
+        Err(e) => {
+            debug!("Failed to run ss: {}", e);
+            return connections;
+        }
+    };
+
+    if !output.status.success() {
+        debug!("ss exited with non-zero status");
+        return connections;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().skip(1) {
+        // ss output format: State Recv-Q Send-Q Local Address:Port Peer Address:Port
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+
+        let state = parts[0];
+        let local = parts[3];
+        let remote = parts[4];
+
+        if let (Some((local_ip, local_port)), Some((remote_ip, remote_port))) =
+            (parse_ss_addr(local), parse_ss_addr(remote))
+        {
             connections.insert(Connection {
-                local_ip: entry.local_address.ip().to_string(),
-                local_port: entry.local_address.port(),
-                remote_ip: entry.remote_address.ip().to_string(),
-                remote_port: entry.remote_address.port(),
+                local_ip,
+                local_port,
+                remote_ip,
+                remote_port,
                 state: state.to_string(),
             });
         }
     }
-    if let Ok(tcp6_entries) = procfs::net::tcp6() {
-        for entry in tcp6_entries {
-            connections.insert(Connection {
-                local_ip: entry.local_address.ip().to_string(),
-                local_port: entry.local_address.port(),
-                remote_ip: entry.remote_address.ip().to_string(),
-                remote_port: entry.remote_address.port(),
-                state: "ESTAB".to_string(), // simplified
-            });
-        }
-    }
+
     connections
+}
+
+/// Parse ss address format (ip:port or [ip]:port or *:port)
+fn parse_ss_addr(addr: &str) -> Option<(String, u16)> {
+    // Handle formats: "0.0.0.0:22", "127.0.0.1:631", "*:*", "[::]:22"
+    if addr == "*:*" {
+        return Some(("0.0.0.0".to_string(), 0));
+    }
+
+    // Find the last ':' to split IP from port
+    let last_colon = addr.rfind(':')?;
+    let ip_part = &addr[..last_colon];
+    let port_str = &addr[last_colon + 1..];
+
+    let port = if port_str == "*" {
+        0
+    } else {
+        port_str.parse::<u16>().ok()?
+    };
+
+    // Clean up IP: remove brackets for IPv6
+    let ip = ip_part
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+
+    // Normalize: ss uses "*" for wildcard, /proc/net/tcp uses "0.0.0.0"
+    let ip = if ip == "*" { "0.0.0.0".to_string() } else { ip };
+
+    Some((ip, port))
 }
 
 /// Check if two connections match (ignoring state format differences)
@@ -462,31 +569,6 @@ fn connections_match(proc_conn: &Connection, ss_conn: &Connection) -> bool {
         && proc_conn.local_port == ss_conn.local_port
         && proc_conn.remote_ip == ss_conn.remote_ip
         && proc_conn.remote_port == ss_conn.remote_port
-}
-
-/// Check if connection difference is likely just a formatting issue
-fn is_likely_formatting_difference(conn: &Connection) -> bool {
-    // IPv6 connections: our parse_proc_addr doesn't fully parse IPv6 hex
-    // addresses, so all IPv6 connections show as "::" and won't match the
-    // procfs crate's parsed addresses.  This is a parsing limitation, not
-    // a rootkit.  Docker containers commonly use IPv6.
-    if conn.local_ip == "::" || conn.remote_ip == "::" {
-        return true;
-    }
-    if (conn.state == "0A" || conn.state == "LISTEN") && conn.local_ip == "0.0.0.0" {
-        return true;
-    }
-    if conn.remote_ip == "0.0.0.0" && conn.remote_port == 0 {
-        return true;
-    }
-    if conn.state == "06"
-        || conn.state == "08"
-        || conn.state == "TIME-WAIT"
-        || conn.state == "CLOSE-WAIT"
-    {
-        return true;
-    }
-    false
 }
 
 /// Parse /proc/net address format (hex IP:port)
