@@ -11,11 +11,13 @@ use linux_guardian::utils::privilege::{
     check_privileges, get_detector_privilege_info, group_detectors_by_privilege,
 };
 
+mod commands;
+
 #[derive(Parser, Debug)]
 #[command(name = "linux-guardian")]
 #[command(version)]
 #[command(about = "Fast Linux security scanner", long_about = None)]
-struct Args {
+pub(crate) struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -49,11 +51,11 @@ struct Args {
 
     /// Path to suppression config
     #[arg(long)]
-    config: Option<String>,
+    pub(crate) config: Option<String>,
 
     /// Skip malware hash checks
     #[arg(long)]
-    no_malware: bool,
+    pub(crate) no_malware: bool,
 
     /// Skip CVE database checks
     #[arg(long)]
@@ -95,55 +97,19 @@ async fn main() -> Result<()> {
     // Handle subcommands
     match args.command {
         Some(Command::Setup) => {
-            return run_setup().await;
+            return commands::run_setup().await;
         }
         Some(Command::Update) => {
-            println!("Updating all databases...\n");
-            if let Err(e) = linux_guardian::cve_db::update_database().await {
-                eprintln!("CVE database update failed: {}", e);
-                std::process::exit(1);
-            }
-            println!("CVE database updated.\n");
-            if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
-                eprintln!("Malware hash database update failed: {}", e);
-                std::process::exit(1);
-            }
-            println!("\nAll databases updated.");
-            return Ok(());
+            return commands::run_update().await;
         }
         Some(Command::Stats) => {
-            match linux_guardian::cve_db::get_database_stats() {
-                Ok(stats) => {
-                    println!("CVE Database:");
-                    println!("  Total CVEs: {}", stats.total_cves);
-                    println!("  Critical (CVSS >= 9.0): {}", stats.critical_cves);
-                    println!("  Actively Exploited: {}", stats.actively_exploited);
-                    if let Some(last_update) = stats.last_update {
-                        println!("  Last Updated: {}", last_update);
-                    } else {
-                        println!("  Last Updated: Never (run: linux-guardian update)");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("No CVE database: {} (run: linux-guardian update)", e);
-                }
-            }
-            println!();
-            if let Err(e) = detectors::malware_hash_db::show_malware_db_stats().await {
-                eprintln!("No malware database: {} (run: linux-guardian update)", e);
-            }
-            return Ok(());
+            return commands::run_stats().await;
         }
         Some(Command::Config) => {
-            println!(
-                "{}",
-                linux_guardian::server_context::SuppressionConfig::example_toml()
-            );
-            return Ok(());
+            return commands::run_config();
         }
         Some(Command::Privileges) => {
-            print_privilege_info_table();
-            return Ok(());
+            return commands::run_privileges();
         }
         None => {} // Default: run scan
     }
@@ -285,7 +251,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_scan(
+pub(crate) async fn run_scan(
     args: &Args,
     mode: ScanMode,
     is_root: bool,
@@ -423,124 +389,7 @@ async fn run_fast_checks(is_root: bool) -> Result<Vec<linux_guardian::models::Fi
     Ok(findings)
 }
 
-fn prompt_yn(question: &str, default_yes: bool) -> bool {
-    use std::io::{self, Write};
-    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-    print!("{} {} ", question, hint);
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    let input = input.trim().to_lowercase();
-    if input.is_empty() {
-        return default_yes;
-    }
-    input.starts_with('y')
-}
-
-async fn run_setup() -> Result<()> {
-    println!("{}", "Linux Guardian - Setup\n".bold().bright_cyan());
-
-    // 1. Check databases
-    let has_cve = cve_database_exists();
-    let has_malware = malware_database_exists();
-
-    println!(
-        "CVE database: {}",
-        if has_cve {
-            "installed".green()
-        } else {
-            "not found".yellow()
-        }
-    );
-    println!(
-        "Malware hash database: {}",
-        if has_malware {
-            "installed".green()
-        } else {
-            "not found".yellow()
-        }
-    );
-    println!();
-
-    // 2. Download/update CVE database
-    let cve_prompt = if has_cve {
-        "Update CVE database? (~50MB, CISA KEV + NVD)"
-    } else {
-        "Download CVE database? (~50MB, CISA KEV + NVD)"
-    };
-    if prompt_yn(cve_prompt, !has_cve) {
-        println!();
-        if let Err(e) = linux_guardian::cve_db::update_database().await {
-            eprintln!("{}", format!("CVE database failed: {}", e).red());
-        } else {
-            println!("{}", "CVE database ready.".green());
-        }
-        println!();
-    }
-
-    // 3. Download/update malware hash database
-    let malware_prompt = if has_malware {
-        "Update malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)"
-    } else {
-        "Download malware hash database? (~200MB, 4M+ signatures from MalwareBazaar)"
-    };
-    if prompt_yn(malware_prompt, !has_malware) {
-        println!();
-        if let Err(e) = detectors::malware_hash_db::update_malware_database().await {
-            eprintln!("{}", format!("Malware database failed: {}", e).red());
-        } else {
-            println!("{}", "Malware hash database ready.".green());
-        }
-        println!();
-    }
-
-    // 4. Show privilege info
-    let is_root = check_privileges();
-    println!();
-    if is_root {
-        println!("Running as: {}", "root (full access)".green());
-    } else {
-        println!("Running as: {}", "non-root (limited)".yellow());
-        println!("  Most checks work fine without root.");
-        println!("  Run with sudo for complete coverage.");
-    }
-
-    // 5. Offer to run first scan
-    println!();
-    if prompt_yn("Run a quick scan now?", true) {
-        println!();
-        // Re-parse with no args to run default scan
-        let scan_args = Args::parse_from(["linux-guardian"]);
-        let server_context = linux_guardian::server_context::ServerContext::detect();
-        let mut suppression_config =
-            linux_guardian::server_context::SuppressionConfig::load_default();
-        suppression_config.merge_with_context(&server_context);
-
-        print_banner();
-        let start = Instant::now();
-        let findings = run_scan(
-            &scan_args,
-            ScanMode::Fast,
-            is_root,
-            &server_context,
-            &suppression_config,
-        )
-        .await?;
-        let duration = start.elapsed();
-
-        output::print_findings(&findings, OutputStyle::Terminal, false, false);
-        println!("\n  Scan completed in {:.2}s", duration.as_secs_f32());
-    }
-
-    println!("\n{}", "Setup complete!".green().bold());
-    println!("  linux-guardian          # fast scan");
-    println!("  linux-guardian --deep   # full scan");
-    println!("  linux-guardian update   # update databases");
-
-    Ok(())
-}
-
-fn print_banner() {
+pub(crate) fn print_banner() {
     println!(
         "{}",
         "╔═══════════════════════════════════════════════════════════╗".bright_cyan()
@@ -586,7 +435,7 @@ fn print_privilege_warning(mode: &ScanMode) {
     println!();
 }
 
-fn print_privilege_info_table() {
+pub(crate) fn print_privilege_info_table() {
     let (no_root, partial_root, requires_root) = group_detectors_by_privilege();
 
     println!(
@@ -735,7 +584,7 @@ fn adjust_finding_severities(
     findings
 }
 
-fn cve_database_exists() -> bool {
+pub(crate) fn cve_database_exists() -> bool {
     let mut paths = vec![std::path::PathBuf::from("/var/cache/linux-guardian/cve.db")];
     if let Ok(home) = std::env::var("HOME") {
         paths.push(std::path::PathBuf::from(home).join(".cache/linux-guardian/cve.db"));
@@ -748,7 +597,7 @@ fn cve_database_exists() -> bool {
     })
 }
 
-fn malware_database_exists() -> bool {
+pub(crate) fn malware_database_exists() -> bool {
     let mut paths = vec![std::path::PathBuf::from(
         "/var/cache/linux-guardian/malware_hashes.csv",
     )];

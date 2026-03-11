@@ -200,6 +200,19 @@ pub async fn detect_kernel_modules() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// Hardware/driver modules whose debug parameters are normal and expected.
+/// These are not rootkits — flagging them wastes the user's time.
+const SAFE_DEBUG_MODULES: &[&str] = &[
+    "amdgpu", "i915", "nouveau", "radeon",    // GPU drivers
+    "iwlwifi", "ath10k", "ath11k", "mt76",    // WiFi drivers
+    "snd_hda_intel", "snd_hda_core",          // Audio drivers
+    "usbcore", "xhci_hcd", "ehci_hcd",        // USB controllers
+    "nvme", "ahci", "sd_mod",                 // Storage drivers
+    "drm", "drm_kms_helper",                  // Display framework
+    "bluetooth", "btusb",                     // Bluetooth
+    "cfg80211", "mac80211",                   // Wireless framework
+];
+
 /// Check for suspicious module parameters (can enable rootkit features)
 pub async fn check_module_parameters() -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
@@ -209,6 +222,12 @@ pub async fn check_module_parameters() -> Result<Vec<Finding>> {
         for entry in entries.flatten() {
             let module_name = entry.file_name();
             let params_path = entry.path().join("parameters");
+
+            // Skip known hardware drivers — their debug params are normal
+            let mod_name_str = module_name.to_string_lossy();
+            let is_safe_module = SAFE_DEBUG_MODULES
+                .iter()
+                .any(|s| mod_name_str.eq_ignore_ascii_case(s));
 
             if params_path.exists() {
                 if let Ok(param_entries) = fs::read_dir(&params_path) {
@@ -236,8 +255,10 @@ pub async fn check_module_parameters() -> Result<Vec<Finding>> {
                                     && !value_trimmed.is_empty());
 
                             // Debug parameters are only suspicious if ENABLED
-                            let debug_enabled = (param_name_str.contains("debug")
-                                || param_name_str.contains("verbose"))
+                            // and the module is NOT a known hardware driver
+                            let debug_enabled = !is_safe_module
+                                && (param_name_str.contains("debug")
+                                    || param_name_str.contains("verbose"))
                                 && (value_trimmed != "0"
                                     && value_trimmed != "N"
                                     && !value_trimmed.is_empty());

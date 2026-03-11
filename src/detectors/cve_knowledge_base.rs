@@ -157,14 +157,14 @@ pub fn get_cve_database() -> Vec<CveDefinition> {
 
         // === SYSTEMD VULNERABILITIES ===
         CveDefinition {
-            cve_id: "CVE-2024-3094".to_string(),  // Related: systemd can load compromised libs
+            cve_id: "CVE-2023-26604".to_string(),
             product: "systemd".to_string(),
-            vulnerability_name: "systemd Privilege Escalation".to_string(),
-            description: "systemd vulnerabilities allowing privilege escalation".to_string(),
+            vulnerability_name: "systemd-coredump Privilege Escalation via less".to_string(),
+            description: "systemd before 247 allows local users to escalate privileges via less pager invoked from systemd-coredump".to_string(),
             min_version: Some("200".to_string()),
-            max_version: Some("255.99".to_string()),
-            fixed_version: Some("256".to_string()),
-            cvss_score: 7.0,
+            max_version: Some("246.99".to_string()),
+            fixed_version: Some("247".to_string()),
+            cvss_score: 7.8,
             actively_exploited: false,
         },
 

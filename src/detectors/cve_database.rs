@@ -3,7 +3,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use tracing::{debug, info, warn};
 
 /// CISA Known Exploited Vulnerabilities Catalog URL
@@ -46,51 +45,173 @@ struct CisaVulnerability {
     cwes: Vec<String>,
 }
 
-/// Installed package information
-#[derive(Debug, Clone)]
-struct InstalledPackage {
-    name: String,
-    version: String,
-    source: String, // dpkg, rpm, binary
-}
+// ---------------------------------------------------------------------------
+// KEV entries that are relevant to Linux systems.  We match on (vendor, product)
+// pairs — NOT on installed packages.  The KEV catalog has no version-range data,
+// so we cannot determine whether the installed version is actually vulnerable.
+//
+// Instead we report which actively-exploited CVEs *could* affect Linux if the
+// corresponding software is present, grouped into a single informational finding.
+// The real package-to-CVE matching with version ranges lives in:
+//   - cve_knowledge_base.rs   (hardcoded critical CVEs with exact version ranges)
+//   - cve_database_sqlite.rs  (full NVD-backed local database)
+//   - updates.rs              (distro security tracker: apt/dnf/yum)
+// ---------------------------------------------------------------------------
 
-/// Check for known exploited vulnerabilities from CISA KEV
+/// (vendor substring, product substring) pairs for Linux-relevant KEV entries.
+/// Both are matched case-insensitively.  Only entries where both match are
+/// considered relevant.
+const LINUX_KEV_FILTERS: &[(&str, &str)] = &[
+    // Kernel
+    ("linux", "kernel"),
+    // Core userspace
+    ("gnu", "bash"),
+    ("gnu", "glibc"),
+    ("sudo", "sudo"),
+    ("openssh", "openssh"),
+    ("openssl", "openssl"),
+    // Web servers
+    ("apache", "http server"),
+    ("apache", "tomcat"),
+    ("nginx", "nginx"),
+    ("apache", "struts"),
+    ("apache", "log4j"),
+    // Languages / runtimes
+    ("php", "php"),
+    ("python", "python"),
+    ("oracle", "java"),
+    ("red hat", "jboss"),
+    // Databases
+    ("postgresql", "postgresql"),
+    ("oracle", "mysql"),
+    ("redis", "redis"),
+    // Containers
+    ("docker", "docker"),
+    ("linux foundation", "runc"),
+    // DNS / mail / network
+    ("isc", "bind"),
+    ("postfix", "postfix"),
+    ("exim", "exim"),
+    ("samba", "samba"),
+    ("openvpn", "openvpn"),
+    ("strongswan", "strongswan"),
+    // Desktop
+    ("mozilla", "firefox"),
+    ("mozilla", "thunderbird"),
+    ("google", "chromium"),
+    // Other common Linux packages
+    ("haproxy", "haproxy"),
+    ("squid", "squid"),
+    ("grafana", "grafana"),
+    ("gitlab", "gitlab"),
+    ("jenkins", "jenkins"),
+    ("elastic", "elasticsearch"),
+    ("elastic", "kibana"),
+    ("saltstack", "salt"),
+    ("puppet", "puppet"),
+    ("ansible", "ansible"),
+    ("nextcloud", "nextcloud"),
+    ("roundcube", "roundcube"),
+    ("xz", "xz"),
+    ("tukaani", "xz"),
+    ("imagemagick", "imagemagick"),
+    ("cups", "cups"),
+    ("systemd", "systemd"),
+    ("polkit", "polkit"),
+    ("freedesktop", "polkit"),
+];
+
+/// Check CISA KEV for Linux-relevant actively exploited vulnerabilities.
+///
+/// This detector does NOT match against installed packages — the KEV catalog
+/// lacks version-range data, so matching would produce false positives.  Instead
+/// it reports a summary of Linux-relevant KEV entries as context.  Actual
+/// package-to-CVE matching is handled by cve_knowledge_base.rs and
+/// cve_database_sqlite.rs which have proper version-range information.
 pub async fn check_known_exploited_vulnerabilities() -> Result<Vec<Finding>> {
     info!("🔍 Checking CISA Known Exploited Vulnerabilities catalog...");
-    let mut findings = Vec::new();
 
-    // Get KEV database (download or use cache)
     let kev_db = match get_kev_database().await {
         Ok(db) => db,
         Err(e) => {
-            warn!("Failed to load KEV database: {}. Skipping CVE checks.", e);
-            return Ok(findings);
+            warn!("Failed to load KEV database: {}. Skipping KEV check.", e);
+            return Ok(Vec::new());
         }
     };
 
     info!("  Loaded {} known exploited vulnerabilities", kev_db.count);
 
-    // Get installed packages
-    let packages = get_installed_packages();
-    debug!("Found {} installed packages", packages.len());
+    // Filter to Linux-relevant entries
+    let linux_cves: Vec<&CisaVulnerability> = kev_db
+        .vulnerabilities
+        .iter()
+        .filter(|cve| is_linux_relevant(cve))
+        .collect();
 
-    // Match packages against CVEs
-    for cve in &kev_db.vulnerabilities {
-        for package in &packages {
-            if package_matches_cve(package, cve) {
-                findings.push(create_cve_finding(cve, package));
-            }
-        }
+    if linux_cves.is_empty() {
+        info!("  No Linux-relevant KEV entries found");
+        return Ok(Vec::new());
     }
 
-    // Also check kernel version
-    if let Ok(kernel_findings) = check_kernel_cves(&kev_db).await {
-        findings.extend(kernel_findings);
-    }
+    // Count by severity (ransomware use = critical context)
+    let ransomware_count = linux_cves
+        .iter()
+        .filter(|c| c.known_ransomware_campaign_use.to_lowercase() == "known")
+        .count();
 
-    info!("  Found {} CVE matches", findings.len());
-    Ok(findings)
+    // Build a summary finding — not per-CVE, just awareness
+    let sample_cves: Vec<String> = linux_cves
+        .iter()
+        .take(10)
+        .map(|c| format!("{} ({})", c.cve_id, c.product))
+        .collect();
+
+    let finding = Finding::medium(
+        "cisa_kev",
+        &format!(
+            "{} Linux-relevant CVEs in CISA KEV catalog",
+            linux_cves.len()
+        ),
+        &format!(
+            "The CISA Known Exploited Vulnerabilities catalog lists {} CVEs \
+             affecting Linux-relevant software that are actively exploited in the wild. \
+             {} are associated with known ransomware campaigns. \
+             Ensure all system packages are up to date. \
+             Sample entries: {}{}",
+            linux_cves.len(),
+            ransomware_count,
+            sample_cves.join(", "),
+            if linux_cves.len() > 10 { ", ..." } else { "" }
+        ),
+    )
+    .with_remediation(
+        "Run your distribution's security update command: \
+         apt upgrade (Debian/Ubuntu), dnf update --security (Fedora/RHEL), \
+         or check the detailed CVE findings from the knowledge base detector.",
+    );
+
+    info!(
+        "  Found {} Linux-relevant KEV entries ({} ransomware-linked)",
+        linux_cves.len(),
+        ransomware_count
+    );
+
+    Ok(vec![finding])
 }
+
+/// Check if a KEV entry is relevant to Linux systems.
+fn is_linux_relevant(cve: &CisaVulnerability) -> bool {
+    let vendor = cve.vendor_project.to_lowercase();
+    let product = cve.product.to_lowercase();
+
+    LINUX_KEV_FILTERS
+        .iter()
+        .any(|(v, p)| vendor.contains(v) && product.contains(p))
+}
+
+// ---------------------------------------------------------------------------
+// KEV database download / cache
+// ---------------------------------------------------------------------------
 
 /// Get KEV database (download if needed, use cache if recent)
 async fn get_kev_database() -> Result<CisaKevDatabase> {
@@ -113,7 +234,6 @@ async fn get_kev_database() -> Result<CisaKevDatabase> {
         }
     }
 
-    // Download fresh KEV database
     debug!("Downloading fresh KEV database from CISA...");
     download_kev_database().await
 }
@@ -126,20 +246,21 @@ async fn download_kev_database() -> Result<CisaKevDatabase> {
 
     let response = client.get(CISA_KEV_URL).send().await?;
 
-    // Check HTTP status before reading body
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("CISA KEV download returned HTTP {}", status);
     }
 
-    // Download body as text first for better error diagnostics and to allow
-    // caching the raw JSON even if parsing fails.
     let body = response.text().await?;
 
-    let kev_db: CisaKevDatabase = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("Failed to parse KEV JSON: {} (body starts with: {:?})", e, &body[..body.len().min(200)]))?;
+    let kev_db: CisaKevDatabase = serde_json::from_str(&body).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse KEV JSON: {} (body starts with: {:?})",
+            e,
+            &body[..body.len().min(200)]
+        )
+    })?;
 
-    // Save to cache
     if let Err(e) = save_kev_to_cache(&kev_db) {
         warn!("Failed to cache KEV database: {}", e);
     }
@@ -156,10 +277,8 @@ fn load_kev_from_cache(path: &PathBuf) -> Result<CisaKevDatabase> {
 
 /// Save KEV database to cache
 fn save_kev_to_cache(kev_db: &CisaKevDatabase) -> Result<()> {
-    // Create cache directory if it doesn't exist
     let cache_dir = PathBuf::from(CACHE_DIR);
     if !cache_dir.exists() {
-        // Try to create, but don't fail if we can't (no root)
         let _ = fs::create_dir_all(&cache_dir);
     }
 
@@ -177,260 +296,18 @@ fn get_cache_path() -> PathBuf {
     path
 }
 
-/// Get installed packages from the system
-fn get_installed_packages() -> Vec<InstalledPackage> {
-    let mut packages = Vec::new();
-
-    // Try dpkg (Debian/Ubuntu)
-    if let Ok(dpkg_packages) = get_dpkg_packages() {
-        packages.extend(dpkg_packages);
-    }
-
-    // Try rpm (RHEL/CentOS/Fedora)
-    if let Ok(rpm_packages) = get_rpm_packages() {
-        packages.extend(rpm_packages);
-    }
-
-    // Check common binaries directly
-    packages.extend(get_binary_versions());
-
-    packages
-}
-
-/// Get packages from dpkg (Debian/Ubuntu)
-fn get_dpkg_packages() -> Result<Vec<InstalledPackage>> {
-    let output = Command::new("dpkg-query")
-        .args(["-W", "-f=${Package}\t${Version}\n"])
-        .output()?;
-
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let packages: Vec<InstalledPackage> = stdout
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() == 2 {
-                Some(InstalledPackage {
-                    name: normalize_package_name(parts[0]),
-                    version: parse_version(parts[1]),
-                    source: "dpkg".to_string(),
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    Ok(packages)
-}
-
-/// Get packages from rpm (RHEL/CentOS/Fedora)
-fn get_rpm_packages() -> Result<Vec<InstalledPackage>> {
-    let output = Command::new("rpm")
-        .args(["-qa", "--queryformat", "%{NAME}\t%{VERSION}\n"])
-        .output()?;
-
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let packages: Vec<InstalledPackage> = stdout
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() == 2 {
-                Some(InstalledPackage {
-                    name: normalize_package_name(parts[0]),
-                    version: parts[1].to_string(),
-                    source: "rpm".to_string(),
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    Ok(packages)
-}
-
-/// Get versions of common binaries directly
-fn get_binary_versions() -> Vec<InstalledPackage> {
-    let mut packages = Vec::new();
-
-    // Check sudo
-    if let Ok(output) = Command::new("sudo").arg("--version").output() {
-        if let Some(version) = extract_sudo_version(&output.stdout) {
-            packages.push(InstalledPackage {
-                name: "sudo".to_string(),
-                version,
-                source: "binary".to_string(),
-            });
-        }
-    }
-
-    // Check OpenSSH
-    if let Ok(output) = Command::new("ssh").arg("-V").output() {
-        // SSH outputs to stderr
-        if let Some(version) = extract_openssh_version(&output.stderr) {
-            packages.push(InstalledPackage {
-                name: "openssh".to_string(),
-                version,
-                source: "binary".to_string(),
-            });
-        }
-    }
-
-    packages
-}
-
-/// Extract sudo version from output
-fn extract_sudo_version(output: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(output);
-    let re = regex::Regex::new(r"Sudo version (\d+\.\d+\.\d+)").ok()?;
-    re.captures(&text)
-        .and_then(|cap| cap.get(1))
-        .map(|m| m.as_str().to_string())
-}
-
-/// Extract OpenSSH version from output
-fn extract_openssh_version(output: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(output);
-    let re = regex::Regex::new(r"OpenSSH_(\d+\.\d+)").ok()?;
-    re.captures(&text)
-        .and_then(|cap| cap.get(1))
-        .map(|m| m.as_str().to_string())
-}
-
-/// Normalize package name (remove lib prefix, etc.)
-fn normalize_package_name(name: &str) -> String {
-    name.to_lowercase()
-        .replace("-dev", "")
-        .replace("-common", "")
-        .replace("lib", "")
-}
-
-/// Parse version string (remove debian/ubuntu suffixes)
-fn parse_version(version: &str) -> String {
-    // Remove debian suffixes like "-1ubuntu1"
-    version
-        .split('-')
-        .next()
-        .unwrap_or(version)
-        .split('+')
-        .next()
-        .unwrap_or(version)
-        .to_string()
-}
-
-/// Check if a package matches a CVE
-fn package_matches_cve(package: &InstalledPackage, cve: &CisaVulnerability) -> bool {
-    let cve_product = cve.product.to_lowercase();
-    let pkg_name = package.name.to_lowercase();
-
-    // Check if product name matches (fuzzy matching)
-    if !pkg_name.contains(&cve_product) && !cve_product.contains(&pkg_name) {
-        // Also try without spaces
-        let cve_product_nospace = cve_product.replace(" ", "");
-        if !pkg_name.contains(&cve_product_nospace) && !cve_product_nospace.contains(&pkg_name) {
-            return false;
-        }
-    }
-
-    // TODO: Version range checking
-    // For now, we flag any version as it's in the KEV (actively exploited)
-    // A full implementation would parse version ranges from NVD
-
-    true
-}
-
-/// Check kernel version against CVEs
-async fn check_kernel_cves(kev_db: &CisaKevDatabase) -> Result<Vec<Finding>> {
-    let mut findings = Vec::new();
-
-    let kernel_version = fs::read_to_string("/proc/version")?;
-    debug!("Kernel version: {}", kernel_version);
-
-    // Check for kernel-related CVEs in KEV
-    for cve in &kev_db.vulnerabilities {
-        let product_lower = cve.product.to_lowercase();
-        if product_lower.contains("linux") && product_lower.contains("kernel") {
-            findings.push(
-                Finding::high(
-                    "cve_database",
-                    &format!("{} - Linux Kernel Vulnerability", cve.cve_id),
-                    &format!(
-                        "{}: {}. This vulnerability is actively exploited in the wild.",
-                        cve.vulnerability_name, cve.short_description
-                    ),
-                )
-                .with_cve(&cve.cve_id)
-                .with_remediation(&format!(
-                    "Required action: {}. Due date: {}",
-                    cve.required_action, cve.due_date
-                )),
-            );
-        }
-    }
-
-    Ok(findings)
-}
-
-/// Create a finding from a CVE match
-fn create_cve_finding(cve: &CisaVulnerability, package: &InstalledPackage) -> Finding {
-    let severity = if cve.known_ransomware_campaign_use.to_lowercase() == "known" {
-        "critical"
-    } else {
-        "high"
-    };
-
-    let finding = Finding {
-        severity: severity.to_string(),
-        category: "cve_database".to_string(),
-        title: format!(
-            "{} - {} Vulnerability (Actively Exploited)",
-            cve.cve_id, cve.product
-        ),
-        description: format!(
-            "{} version {} is affected by {}: {}. \
-             This vulnerability is in CISA's Known Exploited Vulnerabilities catalog, \
-             meaning it is actively being exploited in the wild. \
-             Date added to KEV: {}",
-            package.name,
-            package.version,
-            cve.vulnerability_name,
-            cve.short_description,
-            cve.date_added
-        ),
-        remediation: Some(format!(
-            "URGENT: {}. Due date: {}. Update {} immediately.",
-            cve.required_action, cve.due_date, package.name
-        )),
-        cve: Some(cve.cve_id.clone()),
-        details: Some(serde_json::json!({
-            "vendor_project": cve.vendor_project,
-            "product": cve.product,
-            "installed_version": package.version,
-            "source": package.source,
-            "date_added_to_kev": cve.date_added,
-            "due_date": cve.due_date,
-            "ransomware_use": cve.known_ransomware_campaign_use,
-            "notes": cve.notes,
-        })),
-    };
-
-    finding
-}
-
 /// Get KEV statistics
 pub async fn get_kev_statistics() -> Result<String> {
     let kev_db = get_kev_database().await?;
 
+    let linux_count = kev_db
+        .vulnerabilities
+        .iter()
+        .filter(|c| is_linux_relevant(c))
+        .count();
+
     Ok(format!(
-        "CISA KEV Catalog v{}: {} known exploited vulnerabilities (released: {})",
-        kev_db.catalog_version, kev_db.count, kev_db.date_released
+        "CISA KEV Catalog v{}: {} total ({} Linux-relevant) known exploited vulnerabilities (released: {})",
+        kev_db.catalog_version, kev_db.count, linux_count, kev_db.date_released
     ))
 }

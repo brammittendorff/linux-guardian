@@ -11,6 +11,11 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
     info!("🔍 Checking for systemd service tampering...");
     let mut findings = Vec::new();
 
+    // Track canonical paths to avoid duplicate findings when directories
+    // are symlinked (e.g. /lib/systemd/system → /usr/lib/systemd/system)
+    // or unit files are symlinked into .wants/ directories.
+    let mut seen_canonical: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
     // Locations to check for systemd units
     let unit_paths = [
         "/etc/systemd/system",
@@ -60,6 +65,15 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                 .filter_map(|e| e.ok())
             {
                 let file_path = entry.path();
+
+                // Resolve symlinks to the real file and skip if already seen.
+                let canonical = match fs::canonicalize(file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if !seen_canonical.insert(canonical) {
+                    continue;
+                }
 
                 // Only check .service, .timer, .socket files
                 if let Some(ext) = file_path.extension() {

@@ -466,6 +466,13 @@ fn connections_match(proc_conn: &Connection, ss_conn: &Connection) -> bool {
 
 /// Check if connection difference is likely just a formatting issue
 fn is_likely_formatting_difference(conn: &Connection) -> bool {
+    // IPv6 connections: our parse_proc_addr doesn't fully parse IPv6 hex
+    // addresses, so all IPv6 connections show as "::" and won't match the
+    // procfs crate's parsed addresses.  This is a parsing limitation, not
+    // a rootkit.  Docker containers commonly use IPv6.
+    if conn.local_ip == "::" || conn.remote_ip == "::" {
+        return true;
+    }
     if (conn.state == "0A" || conn.state == "LISTEN") && conn.local_ip == "0.0.0.0" {
         return true;
     }
