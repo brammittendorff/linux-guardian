@@ -552,10 +552,16 @@ fn parse_ss_addr(addr: &str) -> Option<(String, u16)> {
     };
 
     // Clean up IP: remove brackets for IPv6
-    let ip = ip_part
+    let mut ip = ip_part
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_string();
+
+    // Strip interface suffix: ss can output "127.0.0.53%lo" or "0.0.0.0%docker0"
+    // /proc/net/tcp never includes these, so we must strip them for matching
+    if let Some(pct) = ip.find('%') {
+        ip.truncate(pct);
+    }
 
     // Normalize: ss uses "*" for wildcard, /proc/net/tcp uses "0.0.0.0"
     let ip = if ip == "*" { "0.0.0.0".to_string() } else { ip };
@@ -700,10 +706,16 @@ pub(super) fn is_suspicious_network_process(
     if cmdline.contains("/dev/tcp/") || cmdline.contains("/dev/udp/") {
         return Some("Shell using /dev/tcp or /dev/udp redirection - reverse shell technique");
     }
-    if process_name.contains("nc")
-        || process_name.contains("ncat")
-        || process_name.contains("netcat")
-        || process_name.contains("socat")
+    // Check for netcat/socat by exact binary name (not substring!)
+    // Substring matching causes false positives: "Encoder" contains "nc",
+    // "rpcbind" contains "nc", etc.
+    let proc_base = process_name.rsplit('/').next().unwrap_or(process_name);
+    if proc_base == "nc"
+        || proc_base == "ncat"
+        || proc_base == "netcat"
+        || proc_base == "socat"
+        || proc_base == "nc.openbsd"
+        || proc_base == "nc.traditional"
     {
         return Some("Netcat/Socat - commonly used for reverse shells");
     }

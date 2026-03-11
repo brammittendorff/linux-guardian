@@ -86,14 +86,21 @@ async fn check_critical_file_permissions() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-/// Scan for world-writable files in critical directories
+/// Scan for world-writable files in critical directories.
+/// Groups findings by application/directory to avoid spam (e.g. Tdarr with 50
+/// world-writable files produces one finding, not 50).
 async fn scan_world_writable_files() -> Result<Vec<Finding>> {
+    use std::collections::HashMap;
+
     let mut findings = Vec::new();
 
     // Scan these critical directories (limited scope for performance)
     let scan_paths = ["/etc", "/usr/bin", "/usr/sbin", "/opt"];
 
-    let mut world_writable_count = 0;
+    // Group world-writable files by their top-level application directory
+    // e.g. /opt/Tdarr/Tdarr_Node/foo.js -> "/opt/Tdarr"
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut total_count = 0;
 
     for base_path in &scan_paths {
         if !std::path::Path::new(base_path).exists() {
@@ -108,66 +115,103 @@ async fn scan_world_writable_files() -> Result<Vec<Finding>> {
         {
             let path = entry.path();
 
-            // Skip if not a file
             if !path.is_file() {
                 continue;
             }
 
-            // Check permissions
             if let Ok(metadata) = fs::metadata(path) {
-                let permissions = metadata.permissions();
-                let mode = permissions.mode();
+                let mode = metadata.permissions().mode();
 
-                // Check if world-writable (002 bit set)
                 if (mode & 0o002) != 0 {
-                    let path_str = path.to_string_lossy();
+                    let path_str = path.to_string_lossy().to_string();
 
-                    // Skip /tmp and /var/tmp (expected to have world-writable files)
-                    if path_str.contains("/tmp") {
+                    // Skip /tmp (expected to be world-writable)
+                    if path_str.contains("/tmp/") {
                         continue;
                     }
 
-                    world_writable_count += 1;
+                    total_count += 1;
 
-                    if world_writable_count <= 10 {
-                        // Only report first 10 to avoid spam
-                        findings.push(
-                            Finding::medium(
-                                "file_permissions",
-                                "World-Writable File in Critical Directory",
-                                &format!(
-                                    "File {} is writable by everyone (permissions: {:o})",
-                                    path_str,
-                                    mode & 0o777
-                                ),
-                            )
-                            .with_remediation(&format!(
-                                "Remove world-write: sudo chmod o-w '{}'",
-                                path_str
-                            )),
-                        );
-                    }
+                    // Group by app directory: /opt/App/... -> /opt/App
+                    // /etc/foo -> /etc, /usr/bin/foo -> /usr/bin
+                    let group_key = get_app_group(&path_str, base_path);
+                    groups.entry(group_key).or_default().push(path_str);
                 }
             }
         }
     }
 
-    if world_writable_count > 10 {
-        findings.push(
-            Finding::high(
-                "file_permissions",
-                "Many World-Writable Files Detected",
-                &format!(
-                    "Found {} world-writable files in critical directories. This allows any user to modify system files.",
-                    world_writable_count
-                ),
-            )
-            .with_remediation("Review and fix: sudo find /etc /usr -type f -perm -002 -ls"),
-        );
+    // Emit one finding per group (or per file if ungrouped)
+    for (group, files) in &groups {
+        if files.len() == 1 {
+            // Single file — report individually
+            findings.push(
+                Finding::medium(
+                    "file_permissions",
+                    "World-Writable File in Critical Directory",
+                    &format!("File {} is writable by everyone", files[0]),
+                )
+                .with_remediation(&format!(
+                    "Remove world-write: sudo chmod o-w '{}'",
+                    files[0]
+                )),
+            );
+        } else {
+            // Multiple files in same app — group them
+            let examples: Vec<&str> = files.iter().take(3).map(|s| s.as_str()).collect();
+            let severity = if files.len() > 5 {
+                // Many world-writable files in one app is worse
+                Finding::high(
+                    "file_permissions",
+                    "Application Has Many World-Writable Files",
+                    &format!(
+                        "{} files under '{}' are writable by everyone. Examples: {}{}",
+                        files.len(),
+                        group,
+                        examples.join(", "),
+                        if files.len() > 3 { ", ..." } else { "" }
+                    ),
+                )
+            } else {
+                Finding::medium(
+                    "file_permissions",
+                    "World-Writable Files in Application Directory",
+                    &format!(
+                        "{} files under '{}' are writable by everyone: {}",
+                        files.len(),
+                        group,
+                        examples.join(", ")
+                    ),
+                )
+            };
+            findings.push(
+                severity
+                    .with_remediation(&format!("Fix permissions: sudo chmod -R o-w '{}'", group)),
+            );
+        }
     }
 
-    debug!("Found {} world-writable files", world_writable_count);
+    debug!(
+        "Found {} world-writable files in {} groups",
+        total_count,
+        groups.len()
+    );
     Ok(findings)
+}
+
+/// Get the application group directory for grouping world-writable findings.
+/// e.g. /opt/Tdarr/Tdarr_Node/foo.js -> /opt/Tdarr
+///      /etc/some.conf -> /etc
+fn get_app_group(path: &str, base_path: &str) -> String {
+    // For /opt, group by /opt/<app_name>
+    if base_path == "/opt" {
+        let parts: Vec<&str> = path.splitn(4, '/').collect();
+        if parts.len() >= 3 {
+            return format!("/{}/{}", parts[1], parts[2]);
+        }
+    }
+    // For everything else, group by the base scan path
+    base_path.to_string()
 }
 
 #[cfg(test)]

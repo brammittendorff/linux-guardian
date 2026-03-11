@@ -200,31 +200,74 @@ pub async fn detect_kernel_modules() -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-/// Hardware/driver modules whose debug parameters are normal and expected.
+/// Hardware/driver/subsystem modules whose debug parameters are normal and expected.
 /// These are not rootkits — flagging them wastes the user's time.
 const SAFE_DEBUG_MODULES: &[&str] = &[
+    // GPU drivers
     "amdgpu",
     "i915",
     "nouveau",
-    "radeon", // GPU drivers
+    "radeon",
+    "xe",
+    // WiFi drivers
     "iwlwifi",
+    "iwlmvm",
     "ath10k",
+    "ath10k_core",
     "ath11k",
-    "mt76", // WiFi drivers
+    "ath11k_core",
+    "ath9k",
+    "mt76",
+    "mt7921e",
+    "rtw88",
+    "rtw89",
+    "brcmfmac",
+    // Audio drivers
     "snd_hda_intel",
-    "snd_hda_core", // Audio drivers
+    "snd_hda_core",
+    "snd_hda_codec",
+    "snd_pcm",
+    // USB controllers
     "usbcore",
     "xhci_hcd",
-    "ehci_hcd", // USB controllers
+    "ehci_hcd",
+    "uhci_hcd",
+    "ohci_hcd",
+    // Storage drivers
     "nvme",
+    "nvme_core",
     "ahci",
-    "sd_mod", // Storage drivers
+    "sd_mod",
+    "libata",
+    // Display framework
     "drm",
-    "drm_kms_helper", // Display framework
+    "drm_kms_helper",
+    // Bluetooth
     "bluetooth",
-    "btusb", // Bluetooth
+    "btusb",
+    "btintel",
+    "btrtl",
+    // Wireless framework
     "cfg80211",
-    "mac80211", // Wireless framework
+    "mac80211",
+    // Core kernel subsystems with debug params
+    "acpi",
+    "pci",
+    "scsi_mod",
+    "libahci",
+    // Input
+    "hid",
+    "usbhid",
+    "i2c_core",
+    // Networking core
+    "bonding",
+    "bridge",
+    "veth",
+    // Virtualization
+    "kvm",
+    "kvm_intel",
+    "kvm_amd",
+    "vfio",
 ];
 
 /// Check for suspicious module parameters (can enable rootkit features)
