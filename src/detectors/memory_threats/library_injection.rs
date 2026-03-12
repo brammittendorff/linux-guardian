@@ -195,36 +195,64 @@ fn check_system_preload(findings: &mut Vec<Finding>) {
     }
 }
 
-/// Check if a preloaded library path is suspicious
+/// Check if a preloaded library is suspicious.
+///
+/// Structural approach (no whitelist of library names):
+///
+/// 1. **Bare library names** (no `/`) like `libmozsandbox.so` are resolved by
+///    the dynamic linker from system search paths (`/usr/lib`, `/lib`, etc.).
+///    An attacker can't inject code this way unless they also control
+///    `LD_LIBRARY_PATH` or `/etc/ld.so.conf` — both of which we check
+///    separately. Bare names are safe.
+///
+/// 2. **Full paths from suspicious locations** (`/tmp`, `/dev/shm`, etc.)
+///    are always suspicious — these are writable by any user.
+///
+/// 3. **Full paths from system locations** (`/usr/lib`, `/lib`) are safe —
+///    writing there requires root, and if root is compromised LD_PRELOAD
+///    is the least of your problems.
+///
+/// 4. **Full paths from other locations** — check if the library is
+///    package-managed. If dpkg/rpm owns it, it's legitimate.
 fn is_suspicious_preload(path: &str) -> bool {
-    let suspicious_locations = ["/tmp/", "/dev/shm/", "/var/tmp/", "/home/", "/root/"];
-    let legitimate_preloads = [
-        "libfakeroot",
-        "libjemalloc",
-        "libtcmalloc",
-        "libasan",
-        "libSegFault",
-        "libgtk3-nocsd",
-        "libsandbox",
-        "libtsocks",
-        "libproxychains",
-        "libnss_",
-        "libeatmydata",
-    ];
+    // LD_PRELOAD can contain colon-separated or space-separated paths;
+    // the caller already splits on '\0' for environ, but a single
+    // LD_PRELOAD value may list multiple libraries.
+    for lib in path.split(':').flat_map(|s| s.split_whitespace()) {
+        if is_single_preload_suspicious(lib) {
+            return true;
+        }
+    }
+    false
+}
 
+fn is_single_preload_suspicious(lib: &str) -> bool {
+    // Bare library name (no '/') — resolved from system search paths, safe
+    if !lib.contains('/') {
+        return false;
+    }
+
+    // Full path from temp/writable dirs — always suspicious
+    let suspicious_locations = ["/tmp/", "/dev/shm/", "/var/tmp/"];
     for loc in &suspicious_locations {
-        if path.contains(loc) {
+        if lib.starts_with(loc) {
             return true;
         }
     }
 
-    for legit in &legitimate_preloads {
-        if path.contains(legit) {
-            return false;
-        }
+    // Full path from system dirs — safe
+    if is_trusted_system_path(lib) {
+        return false;
     }
 
-    !path.starts_with("/usr/lib") && !path.starts_with("/lib")
+    // Full path elsewhere — check if package-managed
+    // If dpkg/rpm owns it, it was installed legitimately
+    if is_package_managed(lib) {
+        return false;
+    }
+
+    // Unknown full path, not package-managed — suspicious
+    true
 }
 
 /// Check /proc/PID/maps for injected shared libraries.
@@ -332,6 +360,14 @@ fn check_injected_libraries(
                 if exe_app == lib_app && !exe_app.is_empty() {
                     continue; // Same app directory
                 }
+            }
+
+            // If the library is under ~/.config/<app>/ and <app> matches the
+            // process name, it's the app's own native modules stored in its
+            // config directory (e.g. Discord's libmediapipe.so in
+            // ~/.config/discord/). This is structural, not a whitelist.
+            if is_app_own_config_library(&path, comm) {
+                continue;
             }
 
             // Not in system path, not in app dir — check package manager
@@ -509,6 +545,30 @@ fn is_known_dev_library_path(path: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Return true when the library lives under `~/.config/<app>/` and `<app>`
+/// matches the process comm (case-insensitive).
+///
+/// Apps like Discord store their own native modules inside their XDG config
+/// directory (`~/.config/discord/…`) even though the executable lives under
+/// `/usr/share/discord/`.  The directory name that immediately follows
+/// `.config/` is structurally the app's own namespace, so matching it against
+/// the process name is safe and avoids false positives without any whitelist.
+fn is_app_own_config_library(path: &str, comm: &str) -> bool {
+    // Match the literal "/.config/" segment anywhere in the path (covers all
+    // home directories, not just /home/<user>).
+    let marker = "/.config/";
+    let after = match path.find(marker) {
+        Some(idx) => &path[idx + marker.len()..],
+        None => return false,
+    };
+    // The first path component after .config/ is the app directory name.
+    let app_dir = after.split('/').next().unwrap_or("");
+    if app_dir.is_empty() {
+        return false;
+    }
+    app_dir.eq_ignore_ascii_case(comm)
 }
 
 /// Why a deleted library was deleted

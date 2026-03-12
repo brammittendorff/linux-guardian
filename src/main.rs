@@ -334,9 +334,6 @@ pub(crate) async fn run_scan(
                 tokio::spawn(detectors::process_capabilities::check_file_capabilities()),
                 tokio::spawn(detectors::memory_security::detect_memory_injection()),
                 tokio::spawn(detectors::memory_security::check_core_dumps()),
-                tokio::spawn(detectors::memory_threats::detect_fileless_malware()),
-                tokio::spawn(detectors::memory_threats::detect_process_masquerading()),
-                tokio::spawn(detectors::memory_threats::detect_ld_preload_injection()),
                 tokio::spawn(detectors::memory_threats::deep_scan_process_memory(is_root)),
                 tokio::spawn(detectors::memory_threats::detect_process_hollowing(is_root)),
             ];
