@@ -16,6 +16,28 @@ pub fn execute_command(cmd: &str, args: &[&str]) -> Result<String, std::io::Erro
     }
 }
 
+/// Check if a binary path is managed by the system package manager (dpkg or rpm).
+/// Package-managed binaries are legitimate — e.g. browsers whose binary shows
+/// "(deleted)" during an in-place update.
+pub fn is_binary_package_managed(path: &str) -> bool {
+    // Try dpkg -S (Debian/Ubuntu)
+    if let Ok(output) = Command::new("dpkg").args(["-S", path]).output() {
+        if output.status.success() {
+            return true;
+        }
+    }
+    // Try rpm -qf (RedHat/Fedora/CentOS)
+    if let Ok(output) = Command::new("rpm").args(["-qf", path]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.trim().is_empty() && !stdout.contains("not owned") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Check if a file exists
 pub fn file_exists(path: &str) -> bool {
     std::path::Path::new(path).exists()

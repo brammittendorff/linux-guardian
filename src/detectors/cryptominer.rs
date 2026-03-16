@@ -1,4 +1,5 @@
 use crate::models::Finding;
+use crate::utils::is_binary_package_managed;
 use anyhow::Result;
 use procfs::process::{all_processes, Process};
 use tracing::{debug, info};
@@ -153,22 +154,16 @@ pub async fn detect_cpu_anomalies() -> Result<Vec<Finding>> {
                 high_cpu_processes.push((pid, comm.clone(), cpu_usage, cmdline.clone()));
             }
 
-            // Check for processes that delete their binary (common miner technique)
-            // BUT exclude legitimate processes like Chrome that do this during updates
+            // Check for processes that delete their binary (common miner technique).
+            // Exclude package-managed binaries — they legitimately have "(deleted)"
+            // during updates (e.g. browsers, editors).
             if let Ok(exe) = process.exe() {
                 let exe_path = exe.to_string_lossy();
                 if exe_path.contains("(deleted)") {
-                    // Whitelist: Chrome, Firefox, VS Code and other apps legitimately do this during updates
-                    let is_whitelisted = comm.contains("chrome")
-                            || comm.contains("firefox")
-                            || comm.contains("chromium")
-                            || comm.contains("brave")
-                            || comm.contains("code")  // VS Code
-                            || comm.contains("electron")
-                            || comm.contains("Discord")
-                            || comm.contains("Slack");
+                    let original_path = exe_path.replace(" (deleted)", "");
+                    let is_packaged = is_binary_package_managed(&original_path);
 
-                    if !is_whitelisted {
+                    if !is_packaged {
                         findings.push(
                                 Finding::high(
                                     "cryptominer",

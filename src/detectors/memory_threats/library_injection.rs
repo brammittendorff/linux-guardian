@@ -121,11 +121,7 @@ pub async fn detect_ld_preload_injection() -> Result<Vec<Finding>> {
             .iter()
             .take(10)
             .map(|(lib, procs)| {
-                let proc_names: Vec<&str> = procs
-                    .iter()
-                    .take(3)
-                    .map(|(_, c)| c.as_str())
-                    .collect();
+                let proc_names: Vec<&str> = procs.iter().take(3).map(|(_, c)| c.as_str()).collect();
                 format!(
                     "{} (loaded by {}{})",
                     lib,
@@ -489,7 +485,6 @@ fn check_injected_libraries(
             }
         }
     }
-
 }
 
 /// Development/runtime paths that legitimately contain .so files not tracked

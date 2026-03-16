@@ -325,8 +325,8 @@ pub async fn validate_critical_binaries() -> Result<Vec<Finding>> {
 /// All checks for a single binary given pre-fetched package ownership data.
 async fn validate_single_binary(
     binary_path: String,
-    owned_by: Option<String>,       // package owning this binary (from batch dpkg -S)
-    dpkg_v_output: Option<String>,  // stdout of `dpkg -V <package>` for that package
+    owned_by: Option<String>, // package owning this binary (from batch dpkg -S)
+    dpkg_v_output: Option<String>, // stdout of `dpkg -V <package>` for that package
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -715,7 +715,10 @@ mod tests {
         // Diversions have spaces in the "package" portion.
         let stdout = "diversion by dash from: /bin/sh\nbash: /bin/bash\n";
         let map = parse_dpkg_s_output(stdout);
-        assert!(!map.contains_key("/bin/sh"), "diversion line must be skipped");
+        assert!(
+            !map.contains_key("/bin/sh"),
+            "diversion line must be skipped"
+        );
         assert_eq!(map.get("/bin/bash").map(String::as_str), Some("bash"));
     }
 
@@ -733,8 +736,7 @@ mod tests {
     fn test_check_checksum_from_dpkg_v_detects_md5_mismatch() {
         // Position 2 (0-indexed) is '5' when md5sum differs.
         let dpkg_v_output = "??5?????? c /bin/bash\n";
-        let finding =
-            check_checksum_from_dpkg_v("/bin/bash", "bash", Some(dpkg_v_output));
+        let finding = check_checksum_from_dpkg_v("/bin/bash", "bash", Some(dpkg_v_output));
         assert!(
             finding.is_some(),
             "should detect checksum mismatch when position 2 is '5'"
@@ -748,8 +750,7 @@ mod tests {
     fn test_check_checksum_from_dpkg_v_clean_binary() {
         // All dots means everything matches.
         let dpkg_v_output = ".......... c /bin/bash\n";
-        let finding =
-            check_checksum_from_dpkg_v("/bin/bash", "bash", Some(dpkg_v_output));
+        let finding = check_checksum_from_dpkg_v("/bin/bash", "bash", Some(dpkg_v_output));
         assert!(
             finding.is_none(),
             "should not flag a binary with a clean dpkg -V line"

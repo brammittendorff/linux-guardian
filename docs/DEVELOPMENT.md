@@ -165,5 +165,5 @@ gpg --armor --export-secret-keys KEY_ID  # Add as GPG_PRIVATE_KEY secret
 - All detectors are async (`tokio`) and run in parallel
 - Findings use a unified `Finding` type with severity, category, remediation
 - Server context auto-detects installed services to reduce false positives
-- Suppression config (`/etc/linux-guardian.toml`) lets users whitelist known-good items
+- Suppression config (`/etc/linux-guardian.toml`) lets users suppress known-good findings
 - No data leaves the machine - all scanning is local

@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
         && !server_context.detected_services.is_empty()
     {
         println!(
-            "Detected: {} ({}p/{}s whitelisted)\n",
+            "Detected: {} ({}p/{}s suppressed)\n",
             server_context.detected_services.join(", "),
             suppression_config.ignore_ports.len(),
             suppression_config.allow_root_services.len()
@@ -513,7 +513,7 @@ fn apply_suppressions(
                 }
             }
 
-            // Suppress debug module parameters if whitelisted
+            // Suppress debug module parameters if allowed in config
             if finding.category == "suspicious_module_param" {
                 for module_name in &suppression_config.allow_debug_modules {
                     if finding.description.contains(module_name) {

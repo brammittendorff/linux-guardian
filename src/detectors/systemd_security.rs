@@ -158,10 +158,7 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                                     .join(" ");
 
                                 // Extract the actual binary path (before arguments)
-                                let binary_path = cmd
-                                    .split_whitespace()
-                                    .next()
-                                    .unwrap_or("");
+                                let binary_path = cmd.split_whitespace().next().unwrap_or("");
 
                                 // Network-facing services shouldn't run as root —
                                 // UNLESS the binary is package-managed (dpkg/rpm owns it).
