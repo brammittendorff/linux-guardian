@@ -1,7 +1,6 @@
 use crate::models::Finding;
 use anyhow::Result;
 use regex::Regex;
-use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -90,6 +89,16 @@ fn check_if_packaged(path: &str) -> Option<String> {
         return Some(pkg);
     }
 
+    // On usrmerge systems dpkg may track /bin/foo while the actual path is
+    // /usr/bin/foo (or vice-versa).  Try alternate paths for the original path
+    // before resolving symlinks.
+    for alt_path in get_alternate_paths(path) {
+        if let Some(pkg) = check_path_with_package_manager(&alt_path) {
+            debug!("Found package via alternate path: {} -> {}", path, alt_path);
+            return Some(pkg);
+        }
+    }
+
     // Use canonicalize to resolve ALL symlinks recursively to the final target
     if let Ok(canonical_path) = fs::canonicalize(path) {
         let canonical_str = canonical_path.to_string_lossy().to_string();
@@ -101,10 +110,7 @@ fn check_if_packaged(path: &str) -> Option<String> {
                 return Some(pkg);
             }
 
-            // For hardlinked binaries, dpkg may only track one of /bin/foo or /usr/bin/foo
-            // Try alternative common paths
-            let alternate_paths = get_alternate_paths(&canonical_str);
-            for alt_path in alternate_paths {
+            for alt_path in get_alternate_paths(&canonical_str) {
                 if let Some(pkg) = check_path_with_package_manager(&alt_path) {
                     debug!(
                         "Found package via alternate path: {} -> {}",
@@ -198,97 +204,6 @@ pub async fn scan_suid_binaries(is_root: bool) -> Result<Vec<Finding>> {
         return Ok(findings);
     }
 
-    // Known legitimate SUID binaries (whitelist)
-    let legitimate_suid: HashSet<&str> = [
-        // Core system utilities
-        "/usr/bin/sudo",
-        "/usr/bin/sudoedit",
-        "/usr/bin/su",
-        "/usr/bin/passwd",
-        "/usr/bin/chfn",
-        "/usr/bin/chsh",
-        "/usr/bin/newgrp",
-        "/usr/bin/gpasswd",
-        "/usr/bin/pkexec",
-        "/usr/bin/mount",
-        "/usr/bin/umount",
-        "/usr/bin/fusermount",
-        "/usr/bin/fusermount3",
-        "/usr/bin/sg",
-        "/usr/bin/newuidmap",
-        "/usr/bin/newgidmap",
-        "/usr/bin/ubuntu-core-launcher",
-        "/bin/su",
-        "/bin/sudo",
-        "/bin/sudoedit",
-        "/bin/mount",
-        "/bin/umount",
-        "/bin/ping",
-        "/bin/fusermount",
-        "/bin/fusermount3",
-        "/bin/passwd",
-        "/bin/chfn",
-        "/bin/chsh",
-        "/bin/newgrp",
-        "/bin/gpasswd",
-        "/bin/pkexec",
-        "/bin/sg",
-        "/bin/newuidmap",
-        "/bin/newgidmap",
-        "/bin/ntfs-3g",
-        "/bin/ubuntu-core-launcher",
-        // PolicyKit
-        "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
-        "/usr/lib/policykit-1/polkit-agent-helper-1",
-        // OpenSSH
-        "/usr/lib/openssh/ssh-keysign",
-        // NFS
-        "/usr/sbin/mount.nfs",
-        "/sbin/mount.nfs",
-        // NTFS support
-        "/usr/bin/ntfs-3g",
-        "/sbin/mount.ntfs-3g",
-        "/sbin/mount.ntfs",
-        // Networking
-        "/usr/bin/ping",
-        "/usr/bin/ping6",
-        "/sbin/pppd",
-        "/usr/sbin/pppd",
-        // Mail (Exim, Sendmail, Postfix)
-        "/usr/sbin/exim4",
-        "/usr/sbin/exim",
-        "/usr/sbin/sendmail",
-        "/usr/sbin/rsmtp",
-        "/usr/sbin/rmail",
-        "/usr/sbin/runq",
-        "/usr/bin/newaliases",
-        "/usr/bin/mailq",
-        "/usr/lib/exim4/exim4",
-        "/usr/lib/sendmail",
-        "/sbin/exim4",
-        "/sbin/exim",
-        "/sbin/sendmail",
-        "/sbin/rsmtp",
-        "/sbin/rmail",
-        "/sbin/runq",
-        "/bin/newaliases",
-        "/bin/mailq",
-        // Xorg/Display
-        "/usr/lib/xorg/Xorg.wrap",
-        "/usr/bin/Xorg",
-        // Package managers
-        "/usr/bin/pkexec",
-        // Other legitimate tools
-        "/sbin/runq",
-        "/usr/bin/at",
-        "/usr/bin/crontab",
-        "/usr/sbin/unix_chkpwd",
-        "/usr/bin/chage",
-    ]
-    .iter()
-    .cloned()
-    .collect();
-
     // Suspicious locations for SUID binaries
     let suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp", "/home"];
 
@@ -334,9 +249,6 @@ pub async fn scan_suid_binaries(is_root: bool) -> Result<Vec<Finding>> {
                     let in_suspicious_location =
                         suspicious_paths.iter().any(|sp| path_str.starts_with(sp));
 
-                    // Check if it's not in the whitelist
-                    let is_unknown = !legitimate_suid.contains(path_str.as_str());
-
                     if in_suspicious_location {
                         findings.push(
                             Finding::critical(
@@ -350,18 +262,18 @@ pub async fn scan_suid_binaries(is_root: bool) -> Result<Vec<Finding>> {
                             )
                             .with_remediation(&format!("Investigate and remove if malicious: sudo rm '{}'", path_str)),
                         );
-                    } else if is_unknown && is_suid {
-                        // IMPROVED: Check if binary is part of an installed package
+                    } else if is_suid {
+                        // Structural check: is the binary part of an installed package?
                         let package_info = check_if_packaged(&path_str);
 
                         if let Some(pkg_name) = package_info {
-                            // Binary is part of a legitimate package - log but don't flag as finding
+                            // Binary is part of a legitimate package — no finding
                             debug!(
                                 "SUID binary {} is part of package '{}' - legitimate",
                                 path_str, pkg_name
                             );
                         } else {
-                            // Binary is NOT part of any package - suspicious!
+                            // Binary is NOT part of any package — suspicious
                             findings.push(
                                 Finding::high(
                                     "privilege_escalation",

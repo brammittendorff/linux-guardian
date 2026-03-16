@@ -3,6 +3,7 @@
 use crate::models::Finding;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
@@ -142,107 +143,309 @@ const SUSPICIOUS_STRINGS: &[&str] = &[
     "stratum+tcp://",             // Mining pool connection
 ];
 
-/// Scan critical binaries for legitimacy
-pub async fn validate_critical_binaries() -> Result<Vec<Finding>> {
-    info!("🔍 Validating critical system binaries...");
-    let mut findings = Vec::new();
-
-    for binary_path in CRITICAL_BINARIES {
-        if !std::path::Path::new(binary_path).exists() {
-            debug!("{} not found (may be normal)", binary_path);
-            continue;
-        }
-
-        // 1. Check if binary is from a package
-        if let Some(finding) = check_binary_from_package(binary_path).await {
-            findings.push(finding);
-            continue; // If not from package, already flagged
-        }
-
-        // 2. Check file permissions
-        if let Some(finding) = check_binary_permissions(binary_path) {
-            findings.push(finding);
-        }
-
-        // 3. Check for suspicious strings (backdoor detection)
-        if let Some(finding) = check_binary_strings(binary_path).await {
-            findings.push(finding);
-        }
-
-        // 4. Check modification time (recently modified = suspicious)
-        if let Some(finding) = check_binary_modification_time(binary_path) {
-            findings.push(finding);
-        }
-    }
-
-    info!("  Validated {} critical binaries", CRITICAL_BINARIES.len());
-    Ok(findings)
-}
-
-/// Check if binary belongs to a package (dpkg/rpm)
-async fn check_binary_from_package(binary_path: &str) -> Option<Finding> {
-    // Build list of paths to try:
-    // 1. Original path
-    // 2. usrmerge alternates (/usr/bin/foo → /bin/foo)
-    // 3. Fully resolved symlink target (handles alternatives like iptables → xtables-nft-multi)
-    let mut alternate_paths = vec![
+/// Build the set of candidate paths to query for a given binary path.
+///
+/// Returns the original path, its usrmerge alternate, and the resolved
+/// symlink target (plus that target's usrmerge alternate).  Duplicates are
+/// deduplicated before returning.
+fn candidate_paths_for(binary_path: &str) -> Vec<String> {
+    let mut paths = vec![
         binary_path.to_string(),
         binary_path.replace("/usr/bin/", "/bin/"),
         binary_path.replace("/usr/sbin/", "/sbin/"),
     ];
 
-    // Resolve symlinks (e.g. /usr/sbin/iptables → /etc/alternatives/iptables → /usr/sbin/xtables-nft-multi)
     if let Ok(resolved) = std::fs::canonicalize(binary_path) {
         let resolved_str = resolved.to_string_lossy().to_string();
         if resolved_str != binary_path {
-            alternate_paths.push(resolved_str.clone());
-            // Also try usrmerge alternate of the resolved path
-            alternate_paths.push(resolved_str.replace("/usr/bin/", "/bin/"));
-            alternate_paths.push(resolved_str.replace("/usr/sbin/", "/sbin/"));
+            paths.push(resolved_str.replace("/usr/bin/", "/bin/"));
+            paths.push(resolved_str.replace("/usr/sbin/", "/sbin/"));
+            paths.push(resolved_str);
         }
     }
 
-    // Try dpkg (Debian/Ubuntu) with all possible paths
-    for path in &alternate_paths {
-        if let Ok(output) = Command::new("dpkg").args(["-S", path]).output() {
-            if output.status.success() {
-                debug!("{} belongs to package (verified via {})", binary_path, path);
-                return None; // Good - from package
+    // Deduplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+    paths
+}
+
+/// Run a single `dpkg -S` call with all provided paths as arguments and return
+/// a map of `path -> package_name` for every path that dpkg recognises.
+///
+/// dpkg -S exits with code 1 if *any* path is unknown, but still prints the
+/// results for all paths it does know.  We therefore parse stdout line-by-line
+/// and ignore the exit code entirely.
+fn dpkg_s_batch(paths: &[String]) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    if paths.is_empty() {
+        return result;
+    }
+
+    let output = match Command::new("dpkg").arg("-S").args(paths).output() {
+        Ok(o) => o,
+        Err(_) => return result, // dpkg not available (RPM system)
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        // Format: "package-name:arch: /path/to/file"  (e.g. "coreutils:amd64: /usr/bin/ls")
+        // or:     "package-name: /path/to/file"       (arch-independent packages)
+        // Diversions: "diversion by foo from: /path"  — skip those.
+        //
+        // Split on ": " (colon-space) to correctly handle the ":arch" suffix
+        // in package names. Using split_once(':') would split at the arch
+        // separator and misparse the path.
+        if let Some((pkg_part, path_part)) = line.split_once(": ") {
+            // Strip architecture suffix (e.g. "coreutils:amd64" -> "coreutils")
+            let pkg = pkg_part.split(':').next().unwrap_or(pkg_part).trim();
+            let path = path_part.trim();
+            // A plain package name contains no spaces; diversion lines do.
+            if !pkg.contains(' ') && !path.is_empty() {
+                result.insert(path.to_string(), pkg.to_string());
             }
         }
     }
 
-    // Try rpm (RHEL/Fedora)
-    for path in &alternate_paths {
+    result
+}
+
+/// Run `dpkg -V <package>` for each unique package and return a map of
+/// `package -> stdout`.  One subprocess per unique package instead of one
+/// per binary.
+fn dpkg_v_by_package(packages: &[&str]) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    for &pkg in packages {
+        if let Ok(output) = Command::new("dpkg").args(["-V", pkg]).output() {
+            // dpkg -V exits 0 when all files are clean, non-zero when something
+            // differs.  We want the output either way.
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            result.insert(pkg.to_string(), stdout);
+        }
+    }
+
+    result
+}
+
+/// Scan critical binaries for legitimacy
+pub async fn validate_critical_binaries() -> Result<Vec<Finding>> {
+    info!("Validating critical system binaries...");
+
+    // --- Phase 1: collect binaries that actually exist on this system. -------
+    let existing_binaries: Vec<&str> = CRITICAL_BINARIES
+        .iter()
+        .copied()
+        .filter(|p| std::path::Path::new(p).exists())
+        .collect();
+
+    debug!(
+        "{} of {} critical binaries present on this system",
+        existing_binaries.len(),
+        CRITICAL_BINARIES.len()
+    );
+
+    // --- Phase 2: single batched dpkg -S for all candidate paths. -----------
+    //
+    // For every binary we may need to query /bin/foo, /usr/bin/foo, the
+    // resolved symlink target, etc.  Build the full candidate list once and
+    // feed it to dpkg in a single subprocess call.
+
+    // candidate_paths_for is cheap (just fs::canonicalize), run sequentially.
+    let candidates_per_binary: Vec<Vec<String>> = existing_binaries
+        .iter()
+        .map(|p| candidate_paths_for(p))
+        .collect();
+
+    let all_candidate_paths: Vec<String> = candidates_per_binary
+        .iter()
+        .flat_map(|v| v.iter().cloned())
+        .collect();
+
+    // One dpkg -S call for every candidate path across all binaries.
+    let dpkg_ownership: HashMap<String, String> = dpkg_s_batch(&all_candidate_paths);
+
+    // For each binary, determine whether *any* of its candidates was found.
+    // If found, record the owning package name.
+    let binary_packages: Vec<Option<String>> = candidates_per_binary
+        .iter()
+        .map(|candidates| {
+            candidates
+                .iter()
+                .find_map(|p| dpkg_ownership.get(p).cloned())
+        })
+        .collect();
+
+    // --- Phase 3: batch dpkg -V by unique package. --------------------------
+    let unique_packages: Vec<&str> = {
+        let mut pkgs: Vec<&str> = binary_packages
+            .iter()
+            .filter_map(|opt| opt.as_deref())
+            .collect();
+        pkgs.sort_unstable();
+        pkgs.dedup();
+        pkgs
+    };
+
+    let dpkg_verify: HashMap<String, String> = dpkg_v_by_package(&unique_packages);
+
+    // --- Phase 4: parallel per-binary checks (local I/O only). -------------
+    //
+    // Everything from here is pure local I/O – no more subprocesses.
+    // Spawn one tokio task per binary and collect all findings.
+
+    let mut task_handles = Vec::with_capacity(existing_binaries.len());
+
+    for (idx, &binary_path) in existing_binaries.iter().enumerate() {
+        let owned_by: Option<String> = binary_packages[idx].clone();
+        let pkg_verify_output: Option<String> = owned_by
+            .as_deref()
+            .and_then(|pkg| dpkg_verify.get(pkg).cloned());
+        let binary_path = binary_path.to_string();
+
+        task_handles.push(tokio::spawn(async move {
+            validate_single_binary(binary_path, owned_by, pkg_verify_output).await
+        }));
+    }
+
+    // --- Phase 5: gather results, then RPM fallback for unowned binaries. ---
+    let mut findings = Vec::new();
+
+    for handle in task_handles {
+        if let Ok(binary_findings) = handle.await {
+            findings.extend(binary_findings);
+        }
+    }
+
+    info!("  Validated {} critical binaries", existing_binaries.len());
+    Ok(findings)
+}
+
+/// All checks for a single binary given pre-fetched package ownership data.
+async fn validate_single_binary(
+    binary_path: String,
+    owned_by: Option<String>, // package owning this binary (from batch dpkg -S)
+    dpkg_v_output: Option<String>, // stdout of `dpkg -V <package>` for that package
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    match &owned_by {
+        None => {
+            // dpkg doesn't know it.  Try rpm before flagging.
+            let rpm_owned = rpm_owns_binary(&binary_path);
+            if !rpm_owned {
+                findings.push(
+                    Finding::critical(
+                        "binary_validation",
+                        "Critical Binary Not From Package",
+                        &format!(
+                            "{} is a critical system binary but doesn't belong to any package. \
+                             This could indicate a trojaned/replaced binary.",
+                            binary_path
+                        ),
+                    )
+                    .with_remediation(&format!(
+                        "URGENT: Investigate {} - may be backdoor. Reinstall package or restore from backup",
+                        binary_path
+                    )),
+                );
+            }
+            // Even for unpackaged binaries, still run the local checks below.
+        }
+        Some(package) => {
+            // Binary is package-managed; verify its checksum from the
+            // already-fetched dpkg -V output.
+            if let Some(finding) =
+                check_checksum_from_dpkg_v(&binary_path, package, dpkg_v_output.as_deref())
+            {
+                findings.push(finding);
+            }
+        }
+    }
+
+    // These checks are purely local — they don't care about package ownership.
+    if let Some(finding) = check_binary_permissions(&binary_path) {
+        findings.push(finding);
+    }
+
+    if let Some(finding) = check_binary_strings(&binary_path).await {
+        findings.push(finding);
+    }
+
+    if let Some(finding) = check_binary_modification_time(&binary_path) {
+        findings.push(finding);
+    }
+
+    findings
+}
+
+/// Return true if `rpm -qf <path>` (or any usrmerge alternate) succeeds.
+/// Only called for binaries that dpkg doesn't know about, so the total
+/// number of rpm invocations remains small.
+fn rpm_owns_binary(binary_path: &str) -> bool {
+    let candidates = candidate_paths_for(binary_path);
+    for path in &candidates {
         if let Ok(output) = Command::new("rpm").args(["-qf", path]).output() {
             if output.status.success() {
-                debug!("{} belongs to package (verified via {})", binary_path, path);
-                return None; // Good - from package
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stdout.trim().is_empty() && !stdout.contains("not owned") {
+                    debug!(
+                        "{} belongs to rpm package (verified via {})",
+                        binary_path, path
+                    );
+                    return true;
+                }
             }
         }
     }
+    false
+}
 
-    // Binary not from any package - SUSPICIOUS!
-    // But only flag if binary actually exists
-    if !std::path::Path::new(binary_path).exists() {
-        return None; // Binary doesn't exist, skip
+/// Inspect the pre-fetched `dpkg -V <package>` output for a checksum mismatch
+/// on this specific binary.
+///
+/// dpkg -V output format per tampered file:
+///   "??5?????? c /path/to/file"  (the '5' at index 2 means md5sum differs)
+fn check_checksum_from_dpkg_v(
+    binary_path: &str,
+    package: &str,
+    dpkg_v_output: Option<&str>,
+) -> Option<Finding> {
+    let stdout = dpkg_v_output?;
+
+    // Resolve symlinks so we can match against the canonical path too.
+    let canonical = fs::canonicalize(binary_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| binary_path.to_string());
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if (line.contains(binary_path) || line.contains(canonical.as_str()))
+            && line.len() >= 9
+            && line.as_bytes()[2] == b'5'
+        {
+            return Some(
+                Finding::critical(
+                    "binary_validation",
+                    "Critical Binary Checksum Mismatch",
+                    &format!(
+                        "{} (package: {}) has a different checksum than what was \
+                         installed. The binary has been MODIFIED on disk. This is \
+                         a strong indicator of tampering.",
+                        binary_path, package
+                    ),
+                )
+                .with_remediation(&format!(
+                    "URGENT: Reinstall package: sudo apt-get install --reinstall {} && \
+                     Investigate who modified it: stat '{}' && sudo ausearch -f '{}'",
+                    package, binary_path, binary_path
+                )),
+            );
+        }
     }
 
-    Some(
-        Finding::critical(
-            "binary_validation",
-            "Critical Binary Not From Package",
-            &format!(
-                "{} is a critical system binary but doesn't belong to any package. \
-                 This could indicate a trojaned/replaced binary.",
-                binary_path
-            ),
-        )
-        .with_remediation(&format!(
-            "URGENT: Investigate {} - may be backdoor. Reinstall package or restore from backup",
-            binary_path
-        )),
-    )
+    None
 }
 
 /// Check binary file permissions
@@ -360,7 +563,7 @@ fn check_binary_modification_time(binary_path: &str) -> Option<Finding> {
 
 /// Scan for web shells in web directories
 pub async fn scan_web_shells() -> Result<Vec<Finding>> {
-    info!("🔍 Scanning for web shells...");
+    info!("Scanning for web shells...");
     let mut findings = Vec::new();
 
     // Common web roots
@@ -459,7 +662,6 @@ pub fn hash_file(path: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -480,5 +682,108 @@ mod tests {
         let one_day_ago = 24 * 3600;
 
         assert!(one_day_ago < seven_days_ago);
+    }
+
+    // --- Tests for the new batched dpkg-S parsing logic --------------------
+
+    /// Simulate the line-by-line parser used by dpkg_s_batch.
+    fn parse_dpkg_s_output(stdout: &str) -> HashMap<String, String> {
+        let mut result = HashMap::new();
+        for line in stdout.lines() {
+            if let Some((pkg_part, path_part)) = line.split_once(':') {
+                let pkg = pkg_part.trim();
+                let path = path_part.trim();
+                if !pkg.contains(' ') && !path.is_empty() {
+                    result.insert(path.to_string(), pkg.to_string());
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn test_dpkg_s_batch_parses_normal_output() {
+        let stdout = "coreutils: /bin/ls\ncoreutils: /bin/cp\nbash: /bin/bash\n";
+        let map = parse_dpkg_s_output(stdout);
+        assert_eq!(map.get("/bin/ls").map(String::as_str), Some("coreutils"));
+        assert_eq!(map.get("/bin/cp").map(String::as_str), Some("coreutils"));
+        assert_eq!(map.get("/bin/bash").map(String::as_str), Some("bash"));
+    }
+
+    #[test]
+    fn test_dpkg_s_batch_skips_diversion_lines() {
+        // Diversions have spaces in the "package" portion.
+        let stdout = "diversion by dash from: /bin/sh\nbash: /bin/bash\n";
+        let map = parse_dpkg_s_output(stdout);
+        assert!(
+            !map.contains_key("/bin/sh"),
+            "diversion line must be skipped"
+        );
+        assert_eq!(map.get("/bin/bash").map(String::as_str), Some("bash"));
+    }
+
+    #[test]
+    fn test_dpkg_s_batch_handles_partial_results() {
+        // When one path is unknown dpkg exits 1 but still prints the known ones.
+        // Simulating that: only two of three paths are in the output.
+        let stdout = "coreutils: /bin/ls\nbash: /bin/bash\n";
+        let map = parse_dpkg_s_output(stdout);
+        assert_eq!(map.len(), 2);
+        assert!(!map.contains_key("/usr/bin/nonexistent"));
+    }
+
+    #[test]
+    fn test_check_checksum_from_dpkg_v_detects_md5_mismatch() {
+        // Position 2 (0-indexed) is '5' when md5sum differs.
+        let dpkg_v_output = "??5?????? c /bin/bash\n";
+        let finding = check_checksum_from_dpkg_v("/bin/bash", "bash", Some(dpkg_v_output));
+        assert!(
+            finding.is_some(),
+            "should detect checksum mismatch when position 2 is '5'"
+        );
+        let f = finding.unwrap();
+        assert!(f.description.contains("/bin/bash"));
+        assert!(f.description.contains("bash"));
+    }
+
+    #[test]
+    fn test_check_checksum_from_dpkg_v_clean_binary() {
+        // All dots means everything matches.
+        let dpkg_v_output = ".......... c /bin/bash\n";
+        let finding = check_checksum_from_dpkg_v("/bin/bash", "bash", Some(dpkg_v_output));
+        assert!(
+            finding.is_none(),
+            "should not flag a binary with a clean dpkg -V line"
+        );
+    }
+
+    #[test]
+    fn test_check_checksum_from_dpkg_v_no_output() {
+        // dpkg -V produces no output when the package is fully clean.
+        let finding = check_checksum_from_dpkg_v("/bin/bash", "bash", Some(""));
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_candidate_paths_deduplication() {
+        // A path that has no usrmerge alternate (/bin/bash -> /bin/bash) should
+        // not produce duplicate entries.
+        let candidates = candidate_paths_for("/bin/bash");
+        let unique: std::collections::HashSet<_> = candidates.iter().collect();
+        assert_eq!(
+            candidates.len(),
+            unique.len(),
+            "candidate_paths_for must not return duplicates"
+        );
+    }
+
+    #[test]
+    fn test_candidate_paths_includes_usrmerge_alternate() {
+        // /usr/bin/sudo must also probe /bin/sudo.
+        let candidates = candidate_paths_for("/usr/bin/sudo");
+        assert!(
+            candidates.contains(&"/bin/sudo".to_string()),
+            "usrmerge alternate /bin/sudo must be included"
+        );
     }
 }

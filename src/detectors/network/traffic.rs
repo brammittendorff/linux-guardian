@@ -10,6 +10,10 @@ use super::connections::{get_process_by_inode, is_suspicious_network_process};
 use super::get_connection_history_path;
 use super::services::fingerprint_service;
 use super::{BeaconPattern, ConnectionHistory, ConnectionSnapshot};
+use crate::detectors::memory_threats::elf_parser::{
+    links_network_libraries, parse_elf_needed_libraries,
+};
+use crate::detectors::memory_threats::utils::{format_lineage, get_process_lineage};
 
 /// Check for DNS tunneling indicators
 pub async fn detect_dns_tunneling() -> Result<Vec<Finding>> {
@@ -90,12 +94,33 @@ pub async fn detect_reverse_shells() -> Result<Vec<Finding>> {
                         let service_name = fingerprint_service(entry.local_address.port())
                             .unwrap_or_else(|| exe.clone());
 
+                        // Add process lineage for context
+                        let lineage = get_process_lineage(pid);
+                        let lineage_str = format_lineage(&lineage);
+
+                        // Check if binary even links network libraries
+                        let no_net_libs = {
+                            let exe_path = std::path::Path::new(&exe);
+                            match parse_elf_needed_libraries(exe_path) {
+                                Some(needed) => !links_network_libraries(&needed),
+                                None => false, // Can't parse ELF, don't add this signal
+                            }
+                        };
+
+                        let net_note = if no_net_libs {
+                            " Binary does NOT link any network libraries — network access \
+                             may be through injected code."
+                        } else {
+                            ""
+                        };
+
                         findings.push(
                             Finding::critical(
                                 "reverse_shell",
                                 "Potential Reverse Shell Detected",
                                 &format!(
-                                    "{}: Process '{}' (PID {}) has ESTABLISHED connection from {}:{} to {}:{}. Command: {}",
+                                    "{}: Process '{}' (PID {}) has ESTABLISHED connection from \
+                                     {}:{} to {}:{}. Command: {}.{} Process tree: {}",
                                     reason,
                                     service_name,
                                     pid,
@@ -103,7 +128,9 @@ pub async fn detect_reverse_shells() -> Result<Vec<Finding>> {
                                     entry.local_address.port(),
                                     entry.remote_address.ip(),
                                     remote_port,
-                                    cmdline
+                                    cmdline,
+                                    net_note,
+                                    lineage_str
                                 ),
                             )
                             .with_remediation(&format!(

@@ -1,7 +1,10 @@
 use super::allowlists::*;
 use super::elf_parser::*;
 use super::shellcode::*;
-use super::utils::{parse_address_range, read_process_memory};
+use super::utils::{
+    format_lineage, get_process_lineage, parse_address_range, read_process_memory, shannon_entropy,
+    ENTROPY_PACKED_THRESHOLD,
+};
 use crate::models::Finding;
 use anyhow::Result;
 use procfs::process::all_processes;
@@ -82,82 +85,134 @@ pub async fn deep_scan_process_memory(is_root: bool) -> Result<Vec<Finding>> {
             }
         }
 
-        // Skip if likely JIT (many anonymous executable regions)
-        if suspicious_regions.len() > 10 {
-            debug!(
-                "Process {} (PID: {}) has {} anonymous exec regions, likely JIT",
-                comm,
-                pid,
-                suspicious_regions.len()
-            );
-            continue;
-        }
+        // Limit regions to scan for performance (scan first 20, not all)
+        // Unlike the old approach of skipping processes with >10 regions entirely
+        // (which let attackers hide in JIT-heavy processes), we now scan a sample
+        // and use ENTROPY to distinguish JIT from malware — no whitelists needed.
+        let regions_to_scan = if suspicious_regions.len() > 20 {
+            &suspicious_regions[..20]
+        } else {
+            &suspicious_regions
+        };
 
-        // Read first bytes of each suspicious region
-        for (addr, read_size) in &suspicious_regions {
-            match read_process_memory(pid, *addr, *read_size as usize) {
-                Ok(data) => {
-                    // Check for ELF magic: \x7fELF
-                    if data.len() >= 4
-                        && data[0] == 0x7f
-                        && data[1] == b'E'
-                        && data[2] == b'L'
-                        && data[3] == b'F'
-                    {
-                        findings.push(
-                            Finding::critical(
-                                "memory_injection",
-                                "Injected ELF Binary in Process Memory",
-                                &format!(
-                                    "Process '{}' (PID: {}) has an ELF binary loaded in anonymous \
-                                     memory at 0x{:x}. Strong indicator of code injection.",
-                                    comm, pid, addr
-                                ),
-                            )
-                            .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid))
-                            .with_details(serde_json::json!({
-                                "pid": pid,
-                                "comm": comm,
-                                "address": format!("0x{:x}", addr),
-                                "technique": "process_injection",
-                                "mitre_attack": "T1055"
-                            })),
-                        );
-                    }
-
-                    // Check for shellcode patterns
-                    if let Some(pattern) = detect_shellcode_patterns(&data) {
-                        findings.push(
-                            Finding::critical(
-                                "memory_injection",
-                                "Shellcode Detected in Process Memory",
-                                &format!(
-                                    "Process '{}' (PID: {}) has shellcode pattern ({}) in \
-                                     anonymous memory at 0x{:x}.",
-                                    comm, pid, pattern, addr
-                                ),
-                            )
-                            .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid))
-                            .with_details(serde_json::json!({
-                                "pid": pid,
-                                "comm": comm,
-                                "address": format!("0x{:x}", addr),
-                                "pattern": pattern,
-                                "mitre_attack": "T1055"
-                            })),
-                        );
-                    }
-
-                    // Check for suspicious strings
-                    check_suspicious_strings(&data, pid, &comm, *addr, &mut findings);
-                }
+        for (addr, read_size) in regions_to_scan {
+            let data = match read_process_memory(pid, *addr, *read_size as usize) {
+                Ok(d) => d,
                 Err(_) => {
                     debug!(
                         "Could not read memory of process {} (PID: {}) at 0x{:x}",
                         comm, pid, addr
                     );
+                    continue;
                 }
+            };
+
+            // Calculate entropy to classify the content
+            let entropy = shannon_entropy(&data);
+
+            // ELF magic: \x7fELF — injected ELF regardless of entropy
+            if data.len() >= 4
+                && data[0] == 0x7f
+                && data[1] == b'E'
+                && data[2] == b'L'
+                && data[3] == b'F'
+            {
+                let lineage = get_process_lineage(pid);
+                findings.push(
+                    Finding::critical(
+                        "memory_injection",
+                        "Injected ELF Binary in Process Memory",
+                        &format!(
+                            "Process '{}' (PID: {}) has an ELF binary loaded in anonymous \
+                             memory at 0x{:x}. Entropy: {:.2}. Process tree: {}",
+                            comm,
+                            pid,
+                            addr,
+                            entropy,
+                            format_lineage(&lineage)
+                        ),
+                    )
+                    .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid))
+                    .with_details(serde_json::json!({
+                        "pid": pid,
+                        "comm": comm,
+                        "address": format!("0x{:x}", addr),
+                        "entropy": format!("{:.2}", entropy),
+                        "process_tree": format_lineage(&lineage),
+                        "technique": "process_injection",
+                        "mitre_attack": "T1055"
+                    })),
+                );
+                continue;
             }
+
+            // Shellcode patterns — always flag
+            if let Some(pattern) = detect_shellcode_patterns(&data) {
+                let lineage = get_process_lineage(pid);
+                findings.push(
+                    Finding::critical(
+                        "memory_injection",
+                        "Shellcode Detected in Process Memory",
+                        &format!(
+                            "Process '{}' (PID: {}) has shellcode pattern ({}) in \
+                             anonymous memory at 0x{:x}. Entropy: {:.2}. Process tree: {}",
+                            comm,
+                            pid,
+                            pattern,
+                            addr,
+                            entropy,
+                            format_lineage(&lineage)
+                        ),
+                    )
+                    .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid))
+                    .with_details(serde_json::json!({
+                        "pid": pid,
+                        "comm": comm,
+                        "address": format!("0x{:x}", addr),
+                        "pattern": pattern,
+                        "entropy": format!("{:.2}", entropy),
+                        "process_tree": format_lineage(&lineage),
+                        "mitre_attack": "T1055"
+                    })),
+                );
+                continue;
+            }
+
+            // High entropy (>7.7) in executable memory = packed/encrypted malware
+            // Normal JIT code has entropy 5.0-6.5 — this catches what JIT doesn't look like
+            if entropy > ENTROPY_PACKED_THRESHOLD {
+                let lineage = get_process_lineage(pid);
+                findings.push(
+                    Finding::critical(
+                        "memory_injection",
+                        "Encrypted/Packed Code in Process Memory",
+                        &format!(
+                            "Process '{}' (PID: {}) has high-entropy executable memory at \
+                             0x{:x} (entropy: {:.2}/8.0). Normal code is 5.0-6.5; values above \
+                             7.7 indicate encrypted shellcode or packed malware. Process tree: {}",
+                            comm,
+                            pid,
+                            addr,
+                            entropy,
+                            format_lineage(&lineage)
+                        ),
+                    )
+                    .with_remediation(&format!("Kill immediately: sudo kill -9 {}", pid))
+                    .with_details(serde_json::json!({
+                        "pid": pid,
+                        "comm": comm,
+                        "address": format!("0x{:x}", addr),
+                        "entropy": format!("{:.2}", entropy),
+                        "process_tree": format_lineage(&lineage),
+                        "technique": "encrypted_payload",
+                        "mitre_attack": "T1027"
+                    })),
+                );
+                continue;
+            }
+
+            // Normal entropy — check for suspicious strings only
+            check_suspicious_strings(&data, pid, &comm, *addr, &mut findings);
         }
     }
 
@@ -251,7 +306,11 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
         }
 
         // Skip processes being debugged (breakpoints modify .text)
+        // But validate WHO is tracing — unknown tracers are suspicious
         if is_being_traced(pid) {
+            if let Some(tracer_finding) = validate_tracer(pid, &comm) {
+                findings.push(tracer_finding);
+            }
             debug!("Skipping traced process {} (PID: {})", comm, pid);
             continue;
         }
@@ -350,6 +409,22 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
                 .position(|(a, b)| a != b)
                 .unwrap_or(0);
 
+            // Calculate entropy of in-memory .text to characterize the replacement
+            let mem_entropy = shannon_entropy(&mem_text);
+            let lineage = get_process_lineage(pid);
+
+            let entropy_note = if mem_entropy > ENTROPY_PACKED_THRESHOLD {
+                format!(
+                    " In-memory entropy is {:.2} (packed/encrypted — likely malware).",
+                    mem_entropy
+                )
+            } else {
+                format!(
+                    " In-memory entropy is {:.2} (normal code range).",
+                    mem_entropy
+                )
+            };
+
             findings.push(
                 Finding::critical(
                     "process_hollowing",
@@ -358,9 +433,13 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
                         "Process '{}' (PID: {}) has a modified .text section compared to \
                          on-disk binary '{}'. The .text section is read-only and should \
                          NEVER differ from disk (ASLR/PIE/dynamic linking do not modify it). \
-                         First difference at offset 0x{:x}. This indicates code injection \
-                         or process hollowing.",
-                        comm, pid, exe_str, diff_offset
+                         First difference at offset 0x{:x}.{} Process tree: {}",
+                        comm,
+                        pid,
+                        exe_str,
+                        diff_offset,
+                        entropy_note,
+                        format_lineage(&lineage)
                     ),
                 )
                 .with_remediation(&format!(
@@ -375,7 +454,9 @@ pub async fn detect_process_hollowing(is_root: bool) -> Result<Vec<Finding>> {
                     "text_size": text_info.size,
                     "mem_hash": mem_hash,
                     "disk_hash": disk_hash,
+                    "mem_entropy": format!("{:.2}", mem_entropy),
                     "first_diff_offset": format!("0x{:x}", diff_offset),
+                    "process_tree": format_lineage(&lineage),
                     "technique": "process_hollowing",
                     "mitre_attack": "T1055.012"
                 })),

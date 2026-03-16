@@ -240,3 +240,146 @@ pub(super) fn sha256_hash(data: &[u8]) -> String {
     hasher.update(data);
     format!("{:x}", hasher.finalize())
 }
+
+/// Parse DT_NEEDED entries from an ELF binary's .dynamic section.
+///
+/// Returns the list of shared library names the binary was linked against
+/// (e.g., ["libcurl.so.4", "libssl.so.3", "libc.so.6"]).
+///
+/// This tells us what the binary was COMPILED to use. A process that has
+/// network connections but doesn't link any network library is suspicious —
+/// it may be using injected code for network access.
+pub(crate) fn parse_elf_needed_libraries(path: &std::path::Path) -> Option<Vec<String>> {
+    let data = fs::read(path).ok()?;
+
+    // Verify ELF magic + 64-bit + little-endian
+    if data.len() < 64 || &data[0..4] != b"\x7fELF" || data[4] != 2 || data[5] != 1 {
+        return None;
+    }
+
+    let read_u16 = |off: usize| -> u16 { u16::from_le_bytes([data[off], data[off + 1]]) };
+    let read_u32 = |off: usize| -> u32 {
+        u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+    };
+    let read_u64 = |off: usize| -> u64 {
+        u64::from_le_bytes([
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+            data[off + 4],
+            data[off + 5],
+            data[off + 6],
+            data[off + 7],
+        ])
+    };
+
+    let e_shoff = read_u64(40) as usize;
+    let e_shentsize = read_u16(58) as usize;
+    let e_shnum = read_u16(60) as usize;
+
+    if e_shoff == 0 || e_shnum == 0 {
+        return None;
+    }
+
+    // Find .dynamic and .dynstr sections
+    let mut dynamic_offset = 0usize;
+    let mut dynamic_size = 0usize;
+    let mut dynstr_offset = 0usize;
+    let mut dynstr_size = 0usize;
+
+    for i in 0..e_shnum {
+        let sh_off = e_shoff + i * e_shentsize;
+        if sh_off + e_shentsize > data.len() {
+            break;
+        }
+        let sh_type = read_u32(sh_off + 4);
+
+        // SHT_DYNAMIC = 6
+        if sh_type == 6 {
+            dynamic_offset = read_u64(sh_off + 24) as usize;
+            dynamic_size = read_u64(sh_off + 32) as usize;
+        }
+        // SHT_STRTAB = 3, but we need the one linked from .dynamic
+        // The .dynamic section's sh_link points to the string table
+        if sh_type == 6 {
+            let sh_link = read_u32(sh_off + 40) as usize;
+            if sh_link < e_shnum {
+                let strtab_sh = e_shoff + sh_link * e_shentsize;
+                if strtab_sh + e_shentsize <= data.len() {
+                    dynstr_offset = read_u64(strtab_sh + 24) as usize;
+                    dynstr_size = read_u64(strtab_sh + 32) as usize;
+                }
+            }
+        }
+    }
+
+    if dynamic_offset == 0 || dynstr_offset == 0 {
+        return None;
+    }
+    if dynamic_offset + dynamic_size > data.len() || dynstr_offset + dynstr_size > data.len() {
+        return None;
+    }
+
+    // Parse DT_NEEDED entries (d_tag = 1)
+    let mut needed = Vec::new();
+    let mut pos = dynamic_offset;
+    while pos + 16 <= dynamic_offset + dynamic_size {
+        let d_tag = read_u64(pos);
+        let d_val = read_u64(pos + 8) as usize;
+
+        if d_tag == 0 {
+            break; // DT_NULL
+        }
+        if d_tag == 1 {
+            // DT_NEEDED — d_val is offset into .dynstr
+            if d_val < dynstr_size {
+                let name_start = dynstr_offset + d_val;
+                let name_end = data[name_start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|p| name_start + p)
+                    .unwrap_or(name_start);
+                if let Ok(name) = std::str::from_utf8(&data[name_start..name_end]) {
+                    needed.push(name.to_string());
+                }
+            }
+        }
+        pos += 16;
+    }
+
+    Some(needed)
+}
+
+/// Network-related shared libraries. A binary that links against any of these
+/// was compiled to do network I/O. A process WITHOUT these but WITH active
+/// network connections may be using injected code.
+const NETWORK_LIBRARIES: &[&str] = &[
+    "libcurl",
+    "libssl",
+    "libcrypto",
+    "libgnutls",
+    "libssh",
+    "libssh2",
+    "libhttp",
+    "libnghttp",
+    "libwebsocket",
+    "libmicrohttpd",
+    "libsoup",
+    "libgio",        // GLib I/O (includes network)
+    "libglib",       // GLib (often used with network)
+    "libnss",        // Name Service Switch (DNS)
+    "libresolv",     // DNS resolver
+    "libpthread",    // Threading (not network per se, but used by all network code)
+    "libzmq",        // ZeroMQ
+    "libgrpc",       // gRPC
+    "libprotobuf",   // Protocol Buffers (often with gRPC)
+    "libboost_asio", // Boost.Asio
+];
+
+/// Check if a list of DT_NEEDED libraries includes any network-related library.
+pub(crate) fn links_network_libraries(needed: &[String]) -> bool {
+    needed
+        .iter()
+        .any(|lib| NETWORK_LIBRARIES.iter().any(|net| lib.contains(net)))
+}

@@ -157,13 +157,28 @@ pub async fn detect_systemd_tampering() -> Result<Vec<Finding>> {
                                     .collect::<Vec<_>>()
                                     .join(" ");
 
-                                // Network-facing services shouldn't run as root
-                                if args_part.contains("--listen")
-                                    || args_part.contains("--bind")
-                                    || args_part.contains("--serve")
-                                    || args_part.contains("--http")
-                                    || args_part.contains("-l ")
-                                    || args_part.ends_with("-l")
+                                // Extract the actual binary path (before arguments)
+                                let binary_path = cmd.split_whitespace().next().unwrap_or("");
+
+                                // Network-facing services shouldn't run as root —
+                                // UNLESS the binary is package-managed (dpkg/rpm owns it).
+                                // A package-managed binary in a system path is a distro
+                                // service that was designed to run as root. An attacker
+                                // can't fake dpkg ownership.
+                                let is_pkg_managed = !binary_path.is_empty()
+                                    && std::process::Command::new("dpkg")
+                                        .args(["-S", binary_path])
+                                        .output()
+                                        .map(|o| o.status.success())
+                                        .unwrap_or(false);
+
+                                if !is_pkg_managed
+                                    && (args_part.contains("--listen")
+                                        || args_part.contains("--bind")
+                                        || args_part.contains("--serve")
+                                        || args_part.contains("--http")
+                                        || args_part.contains("-l ")
+                                        || args_part.ends_with("-l"))
                                 {
                                     findings.push(
                                         Finding::medium(

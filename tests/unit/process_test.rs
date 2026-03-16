@@ -55,7 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn test_legitimate_daemon_whitelist() {
+    fn test_legitimate_daemon_detection() {
         let legitimate_daemons = vec![
             "systemd", "cron", "sshd", "rsyslogd",
             "dbus-daemon", "networkd", "dockerd",
@@ -71,7 +71,7 @@ mod tests {
         for (name, should_be_legitimate) in processes {
             let is_legitimate = legitimate_daemons.iter()
                 .any(|&daemon| name.contains(daemon));
-            assert_eq!(is_legitimate, should_be_legitimate, "Daemon whitelist failed for '{}'", name);
+            assert_eq!(is_legitimate, should_be_legitimate, "Daemon detection failed for '{}'", name);
         }
     }
 

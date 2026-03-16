@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
         && !server_context.detected_services.is_empty()
     {
         println!(
-            "Detected: {} ({}p/{}s whitelisted)\n",
+            "Detected: {} ({}p/{}s suppressed)\n",
             server_context.detected_services.join(", "),
             suppression_config.ignore_ports.len(),
             suppression_config.allow_root_services.len()
@@ -334,9 +334,6 @@ pub(crate) async fn run_scan(
                 tokio::spawn(detectors::process_capabilities::check_file_capabilities()),
                 tokio::spawn(detectors::memory_security::detect_memory_injection()),
                 tokio::spawn(detectors::memory_security::check_core_dumps()),
-                tokio::spawn(detectors::memory_threats::detect_fileless_malware()),
-                tokio::spawn(detectors::memory_threats::detect_process_masquerading()),
-                tokio::spawn(detectors::memory_threats::detect_ld_preload_injection()),
                 tokio::spawn(detectors::memory_threats::deep_scan_process_memory(is_root)),
                 tokio::spawn(detectors::memory_threats::detect_process_hollowing(is_root)),
             ];
@@ -516,7 +513,7 @@ fn apply_suppressions(
                 }
             }
 
-            // Suppress debug module parameters if whitelisted
+            // Suppress debug module parameters if allowed in config
             if finding.category == "suspicious_module_param" {
                 for module_name in &suppression_config.allow_debug_modules {
                     if finding.description.contains(module_name) {

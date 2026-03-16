@@ -1,4 +1,5 @@
 use crate::models::Finding;
+use crate::utils::is_binary_package_managed;
 use anyhow::Result;
 use procfs::process::{all_processes, Process};
 use std::collections::HashSet;
@@ -102,19 +103,14 @@ pub async fn detect_suspicious_processes() -> Result<Vec<Finding>> {
                     }
                 }
 
-                // Check for processes with deleted binaries
-                // BUT exclude browsers and other legitimate software that does this during updates
+                // Check for processes with deleted binaries.
+                // Exclude package-managed binaries — they legitimately have "(deleted)"
+                // during updates (e.g. browsers, editors).
                 if exe_path.contains("(deleted)") {
-                    let is_whitelisted = comm.contains("chrome")
-                            || comm.contains("firefox")
-                            || comm.contains("chromium")
-                            || comm.contains("brave")
-                            || comm.contains("code")  // VS Code
-                            || comm.contains("electron")
-                            || comm.contains("Discord")
-                            || comm.contains("Slack");
+                    let original_path = exe_path.replace(" (deleted)", "");
+                    let is_packaged = is_binary_package_managed(&original_path);
 
-                    if !is_whitelisted {
+                    if !is_packaged {
                         findings.push(
                                 Finding::high(
                                     "suspicious_process",

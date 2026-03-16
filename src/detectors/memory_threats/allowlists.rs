@@ -1,18 +1,109 @@
+use crate::models::Finding;
 use std::fs;
 
 /// Check if a process is being traced (debugged) — breakpoints modify .text
 pub(super) fn is_being_traced(pid: i32) -> bool {
+    get_tracer_pid(pid) != 0
+}
+
+/// Get the PID of the process tracing `pid`. Returns 0 if not being traced.
+fn get_tracer_pid(pid: i32) -> i32 {
     let status_path = format!("/proc/{}/status", pid);
     if let Ok(content) = fs::read_to_string(&status_path) {
         for line in content.lines() {
             if let Some(tracer) = line.strip_prefix("TracerPid:\t") {
-                if let Ok(tracer_pid) = tracer.trim().parse::<i32>() {
-                    return tracer_pid != 0;
-                }
+                return tracer.trim().parse().unwrap_or(0);
             }
         }
     }
-    false
+    0
+}
+
+/// Known legitimate debugger/tracer binary names
+const KNOWN_DEBUGGERS: &[&str] = &[
+    "gdb",
+    "lldb",
+    "strace",
+    "ltrace",
+    "perf",
+    "valgrind",
+    "rr",
+    "ptrace",
+    "lttng",
+    // IDE debuggers
+    "idea",
+    "clion",
+    "pycharm",
+    "goland",
+    "webstorm",
+    "rider",
+    "rustrover",
+    "eclipse",
+    "netbeans",
+    "codelldb",
+    "cppdbg",
+    // Container runtimes (legitimately trace child processes)
+    "runc",
+    "crun",
+    "containerd",
+    "dockerd",
+    "podman",
+    // Profilers
+    "sysprof",
+    "heaptrack",
+    "massif",
+    "callgrind",
+    "cachegrind",
+    "hotspot",
+    // Security tools
+    "apparmor",
+    "seccomp",
+];
+
+/// Validate WHO is tracing a process. If the tracer is not a known debugger,
+/// it could be malware using ptrace to inject code or prevent analysis.
+///
+/// Returns a Finding if the tracer is suspicious.
+pub(super) fn validate_tracer(pid: i32, comm: &str) -> Option<Finding> {
+    let tracer_pid = get_tracer_pid(pid);
+    if tracer_pid == 0 {
+        return None;
+    }
+
+    // Identify the tracer process
+    let tracer_exe = fs::read_link(format!("/proc/{}/exe", tracer_pid))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tracer_comm = fs::read_to_string(format!("/proc/{}/comm", tracer_pid))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Check if tracer is a known debugger
+    let tracer_base = tracer_exe.rsplit('/').next().unwrap_or(&tracer_exe);
+    let is_known = KNOWN_DEBUGGERS.iter().any(|dbg| {
+        tracer_base == *dbg || tracer_comm == *dbg || tracer_base.starts_with(&format!("{}-", dbg))
+    });
+
+    if is_known {
+        return None;
+    }
+
+    Some(
+        Finding::high(
+            "suspicious_tracer",
+            "Process Being Traced by Unknown Program",
+            &format!(
+                "Process '{}' (PID {}) is being traced by '{}' (PID {}, exe: {}). \
+                 Known debuggers (gdb, lldb, strace, perf, etc.) were not detected. \
+                 Malware uses ptrace to inject code or prevent analysis.",
+                comm, pid, tracer_comm, tracer_pid, tracer_exe
+            ),
+        )
+        .with_remediation(&format!(
+            "Investigate tracer: ls -la /proc/{}/exe && cat /proc/{}/cmdline | tr '\\0' ' '",
+            tracer_pid, tracer_pid
+        )),
+    )
 }
 
 /// Check whether a process is running in a different mount namespace from us.

@@ -1,7 +1,7 @@
 use crate::models::Finding;
 use anyhow::Result;
 use procfs::process::all_processes;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use tracing::{debug, info};
 
@@ -22,6 +22,10 @@ pub async fn detect_ld_preload_injection() -> Result<Vec<Finding>> {
             return Ok(findings);
         }
     };
+
+    // Global tracker for unaccounted libraries — group by library path across all processes
+    // to avoid per-process spam (e.g. 50 processes all loading the same /usr/local/lib/libdrm.so)
+    let mut unaccounted_global: HashMap<String, Vec<(i32, String)>> = HashMap::new();
 
     for process_result in processes {
         let process = match process_result {
@@ -107,7 +111,49 @@ pub async fn detect_ld_preload_injection() -> Result<Vec<Finding>> {
         }
 
         // Check /proc/PID/maps for injected shared libraries
-        check_injected_libraries(pid, &comm, &mut findings);
+        check_injected_libraries(pid, &comm, &mut findings, &mut unaccounted_global);
+    }
+
+    // Report unaccounted libraries grouped by unique library path (not per-process)
+    if !unaccounted_global.is_empty() {
+        let lib_count = unaccounted_global.len();
+        let examples: Vec<String> = unaccounted_global
+            .iter()
+            .take(10)
+            .map(|(lib, procs)| {
+                let proc_names: Vec<&str> = procs.iter().take(3).map(|(_, c)| c.as_str()).collect();
+                format!(
+                    "{} (loaded by {}{})",
+                    lib,
+                    proc_names.join(", "),
+                    if procs.len() > 3 {
+                        format!(" +{} more", procs.len() - 3)
+                    } else {
+                        String::new()
+                    }
+                )
+            })
+            .collect();
+        findings.push(
+            Finding::medium(
+                "library_unaccounted",
+                "Unaccounted Shared Libraries Loaded",
+                &format!(
+                    "{} shared libraries are not from system paths, not from application directories, \
+                     and not managed by the package manager: {}{}",
+                    lib_count,
+                    examples.join("; "),
+                    if lib_count > 10 {
+                        format!(" ... and {} more", lib_count - 10)
+                    } else {
+                        String::new()
+                    }
+                ),
+            )
+            .with_remediation(
+                "Verify these libraries: dpkg -S <path> for each, or check if they belong to the application",
+            ),
+        );
     }
 
     if findings.is_empty() {
@@ -145,50 +191,97 @@ fn check_system_preload(findings: &mut Vec<Finding>) {
     }
 }
 
-/// Check if a preloaded library path is suspicious
+/// Check if a preloaded library is suspicious.
+///
+/// Structural approach (no whitelist of library names):
+///
+/// 1. **Bare library names** (no `/`) like `libmozsandbox.so` are resolved by
+///    the dynamic linker from system search paths (`/usr/lib`, `/lib`, etc.).
+///    An attacker can't inject code this way unless they also control
+///    `LD_LIBRARY_PATH` or `/etc/ld.so.conf` — both of which we check
+///    separately. Bare names are safe.
+///
+/// 2. **Full paths from suspicious locations** (`/tmp`, `/dev/shm`, etc.)
+///    are always suspicious — these are writable by any user.
+///
+/// 3. **Full paths from system locations** (`/usr/lib`, `/lib`) are safe —
+///    writing there requires root, and if root is compromised LD_PRELOAD
+///    is the least of your problems.
+///
+/// 4. **Full paths from other locations** — check if the library is
+///    package-managed. If dpkg/rpm owns it, it's legitimate.
 fn is_suspicious_preload(path: &str) -> bool {
-    let suspicious_locations = ["/tmp/", "/dev/shm/", "/var/tmp/", "/home/", "/root/"];
-    let legitimate_preloads = [
-        "libfakeroot",
-        "libjemalloc",
-        "libtcmalloc",
-        "libasan",
-        "libSegFault",
-        "libgtk3-nocsd",
-        "libsandbox",
-        "libtsocks",
-        "libproxychains",
-        "libnss_",
-        "libeatmydata",
-    ];
+    // LD_PRELOAD can contain colon-separated or space-separated paths;
+    // the caller already splits on '\0' for environ, but a single
+    // LD_PRELOAD value may list multiple libraries.
+    for lib in path.split(':').flat_map(|s| s.split_whitespace()) {
+        if is_single_preload_suspicious(lib) {
+            return true;
+        }
+    }
+    false
+}
 
+fn is_single_preload_suspicious(lib: &str) -> bool {
+    // Bare library name (no '/') — resolved from system search paths, safe
+    if !lib.contains('/') {
+        return false;
+    }
+
+    // Full path from temp/writable dirs — always suspicious
+    let suspicious_locations = ["/tmp/", "/dev/shm/", "/var/tmp/"];
     for loc in &suspicious_locations {
-        if path.contains(loc) {
+        if lib.starts_with(loc) {
             return true;
         }
     }
 
-    for legit in &legitimate_preloads {
-        if path.contains(legit) {
-            return false;
-        }
+    // Full path from system dirs — safe
+    if is_trusted_system_path(lib) {
+        return false;
     }
 
-    !path.starts_with("/usr/lib") && !path.starts_with("/lib")
+    // Full path elsewhere — check if package-managed
+    // If dpkg/rpm owns it, it was installed legitimately
+    if is_package_managed(lib) {
+        return false;
+    }
+
+    // Unknown full path, not package-managed — suspicious
+    true
 }
 
-/// Check /proc/PID/maps for injected shared libraries from suspicious locations
-fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
+/// Check /proc/PID/maps for injected shared libraries.
+///
+/// Two-phase approach (no whitelists):
+/// 1. Libraries from /tmp, /dev/shm → always suspicious
+/// 2. ALL other non-system .so files → check if package-managed or from app directory
+fn check_injected_libraries(
+    pid: i32,
+    comm: &str,
+    findings: &mut Vec<Finding>,
+    unaccounted_global: &mut HashMap<String, Vec<(i32, String)>>,
+) {
     let maps_path = format!("/proc/{}/maps", pid);
     let maps = match fs::read_to_string(&maps_path) {
         Ok(m) => m,
         Err(_) => return,
     };
 
+    // Skip container processes — host dpkg knows nothing about their libraries
+    if super::allowlists::is_in_different_mount_namespace(pid) {
+        return;
+    }
+
     let suspicious_paths = ["/tmp/", "/dev/shm/", "/var/tmp/"];
 
     // Deduplicate: only report each unique library path once per process
     let mut seen_libraries = HashSet::new();
+
+    // Resolve the process exe directory for app-directory matching
+    let exe_base = fs::read_link(format!("/proc/{}/exe", pid))
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()));
 
     for line in maps.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -203,8 +296,17 @@ fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
             continue;
         }
 
-        // Check for shared libraries loaded from suspicious locations
-        if path.ends_with(".so") || path.contains(".so.") {
+        // Only check actual shared libraries (not Chrome shared memory, etc.)
+        if !looks_like_shared_library(&path) {
+            continue;
+        }
+
+        // Skip deleted libraries (handled separately below)
+        if path.contains("(deleted)") {
+            // Fall through to the deleted library handler below
+        } else {
+            // Phase 1: Libraries from suspicious temp locations → CRITICAL
+            let mut is_suspicious_location = false;
             for sus in &suspicious_paths {
                 if path.starts_with(sus) {
                     findings.push(
@@ -221,9 +323,58 @@ fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
                             path, pid, sus
                         )),
                     );
+                    is_suspicious_location = true;
                     break;
                 }
             }
+            if is_suspicious_location {
+                continue;
+            }
+
+            // Phase 2: Check if non-system .so files are accounted for
+            // System paths (/usr/lib, /lib, /usr/local/lib) are trusted
+            // /usr/local/lib is the standard FHS path for locally-compiled libraries
+            // (e.g. libdrm, libwayland built from source via make install)
+            if is_trusted_system_path(&path) {
+                continue;
+            }
+
+            // Skip well-known development/runtime paths that legitimately load
+            // non-system .so files (Docker, dev tools, language runtimes)
+            if is_known_dev_library_path(&path) {
+                continue;
+            }
+
+            // If the library is in the same app directory as the process exe, it's fine
+            if let Some(ref exe_dir) = exe_base {
+                let lib_dir = std::path::Path::new(&path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let exe_app = get_app_base_dir(exe_dir);
+                let lib_app = get_app_base_dir(&lib_dir);
+                if exe_app == lib_app && !exe_app.is_empty() {
+                    continue; // Same app directory
+                }
+            }
+
+            // If the library is under ~/.config/<app>/ and <app> matches the
+            // process name, it's the app's own native modules stored in its
+            // config directory (e.g. Discord's libmediapipe.so in
+            // ~/.config/discord/). This is structural, not a whitelist.
+            if is_app_own_config_library(&path, comm) {
+                continue;
+            }
+
+            // Not in system path, not in app dir — check package manager
+            if !is_package_managed(&path) {
+                unaccounted_global
+                    .entry(path.clone())
+                    .or_default()
+                    .push((pid, comm.to_string()));
+            }
+
+            continue; // Don't fall through to deleted handler
         }
 
         // Check for deleted shared libraries (injected then removed)
@@ -336,6 +487,85 @@ fn check_injected_libraries(pid: i32, comm: &str, findings: &mut Vec<Finding>) {
     }
 }
 
+/// Development/runtime paths that legitimately contain .so files not tracked
+/// by the system package manager. These are NOT whitelists of specific libraries —
+/// they're structural patterns that indicate "this is a dev/runtime environment".
+fn is_known_dev_library_path(path: &str) -> bool {
+    // Python virtual environments and site-packages
+    if path.contains("/site-packages/")
+        || path.contains("/.venv/")
+        || path.contains("/venv/")
+        || path.contains("/virtualenv/")
+    {
+        return true;
+    }
+    // Node.js native addons
+    if path.contains("/node_modules/") {
+        return true;
+    }
+    // Rust build artifacts
+    if path.contains("/target/debug/") || path.contains("/target/release/") {
+        return true;
+    }
+    // Go plugin .so files
+    if path.contains("/go/pkg/") {
+        return true;
+    }
+    // Java/JVM native libraries
+    if path.contains("/jre/lib/") || path.contains("/jdk/lib/") || path.contains("/jvm/") {
+        return true;
+    }
+    // Ruby gems with native extensions
+    if path.contains("/gems/") && path.contains("/ext/") {
+        return true;
+    }
+    // Snap/Flatpak runtimes (their own lib paths)
+    if path.starts_with("/snap/") || path.starts_with("/var/lib/flatpak/") {
+        return true;
+    }
+    // Docker overlay filesystem libraries (visible from host)
+    if path.contains("/overlay2/") || path.contains("/docker/") {
+        return true;
+    }
+    // Nix/Guix store
+    if path.starts_with("/nix/store/") || path.starts_with("/gnu/store/") {
+        return true;
+    }
+    // Conda environments
+    if path.contains("/conda/") || path.contains("/miniconda/") || path.contains("/anaconda/") {
+        return true;
+    }
+    // Homebrew on Linux (linuxbrew)
+    if path.contains("/homebrew/") || path.contains("/linuxbrew/") {
+        return true;
+    }
+    false
+}
+
+/// Return true when the library lives under `~/.config/<app>/` and `<app>`
+/// matches the process comm (case-insensitive).
+///
+/// Apps like Discord store their own native modules inside their XDG config
+/// directory (`~/.config/discord/…`) even though the executable lives under
+/// `/usr/share/discord/`.  The directory name that immediately follows
+/// `.config/` is structurally the app's own namespace, so matching it against
+/// the process name is safe and avoids false positives without any whitelist.
+fn is_app_own_config_library(path: &str, comm: &str) -> bool {
+    // Match the literal "/.config/" segment anywhere in the path (covers all
+    // home directories, not just /home/<user>).
+    let marker = "/.config/";
+    let after = match path.find(marker) {
+        Some(idx) => &path[idx + marker.len()..],
+        None => return false,
+    };
+    // The first path component after .config/ is the app directory name.
+    let app_dir = after.split('/').next().unwrap_or("");
+    if app_dir.is_empty() {
+        return false;
+    }
+    app_dir.eq_ignore_ascii_case(comm)
+}
+
 /// Why a deleted library was deleted
 enum DeletedLibraryReason {
     /// A newer file exists at the same path (app/package was updated)
@@ -350,17 +580,36 @@ enum DeletedLibraryReason {
     TrulyDeleted,
 }
 
+/// Standard system library paths that are trusted.
+/// These are FHS-compliant paths where system/locally-compiled libraries live.
+fn is_trusted_system_path(path: &str) -> bool {
+    path.starts_with("/usr/lib")
+        || path.starts_with("/usr/local/lib")
+        || path.starts_with("/lib/")
+        || path.starts_with("/lib64/")
+}
+
+/// Check if a path looks like a shared library (.so file).
+///
+/// Must end with `.so` or contain `.so.` (for versioned libs like `libfoo.so.6`).
+/// Simple `.contains(".so")` is WRONG — it matches Chrome shared memory files
+/// like `.com.google.Chrome.somJGP` because `.som` starts with `.so`.
+fn looks_like_shared_library(path: &str) -> bool {
+    // Strip " (deleted)" suffix for clean extension checking
+    let clean = path.strip_suffix(" (deleted)").unwrap_or(path).trim();
+    clean.ends_with(".so") || clean.contains(".so.")
+}
+
 /// Check if a map entry is a deleted shared library
 fn is_deleted_shared_library(path: &str) -> bool {
     if !path.contains("(deleted)") {
         return false;
     }
-    // Must be a .so file
-    if !path.contains(".so") {
+    if !looks_like_shared_library(path) {
         return false;
     }
     // Skip system library paths — handled by package manager, low risk
-    if path.starts_with("/usr/lib") || path.starts_with("/lib/") || path.starts_with("/lib64/") {
+    if is_trusted_system_path(path) {
         return false;
     }
     true
