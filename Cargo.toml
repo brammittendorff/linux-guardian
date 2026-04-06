@@ -21,7 +21,7 @@ clap = { version = "4.6", features = ["derive", "cargo"] }
 colored = "3.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "1.0"
+toml = "1.1"
 
 # System interfaces
 libc = "0.2"
@@ -29,7 +29,7 @@ nix = { version = "0.31", features = ["user", "process", "fs", "uio"] }
 procfs = { version = "0.18", default-features = false }
 
 # Async runtime for parallel execution
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 futures = "0.3"
 
 # HTTP client for CVE database downloads
