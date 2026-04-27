@@ -61,7 +61,7 @@ pnet = { version = "0.35", optional = true }
 # Socket2 for better TCP/UDP control
 socket2 = { version = "0.6", features = ["all"] }
 # Hickory DNS (formerly trust-dns) for DNS analysis
-hickory-resolver = { version = "0.25", optional = true }
+hickory-resolver = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27"
