@@ -238,7 +238,7 @@ pub(super) fn read_file_range(path: &std::path::Path, offset: u64, size: usize) 
 pub(super) fn sha256_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Parse DT_NEEDED entries from an ELF binary's .dynamic section.
